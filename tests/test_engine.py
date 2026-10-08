@@ -246,7 +246,8 @@ class LayoutTest(unittest.TestCase):
 
 class SessionTest(unittest.TestCase):
     def test_session_active_parsing(self):
-        real = E._loginctl
+        real, real_lock = E._loginctl, E.screen_locked
+        E.screen_locked = lambda: False
         try:
             E._loginctl = lambda *a: "Active=yes\nLockedHint=no"
             self.assertTrue(E.session_active("2"))
@@ -257,8 +258,60 @@ class SessionTest(unittest.TestCase):
             E._loginctl = lambda *a: None  # logind unreachable: fail closed
             self.assertFalse(E.session_active("2"))
             self.assertFalse(E.session_active(None))
+            # Omarchy's lock screen does not set LockedHint: asked directly
+            E._loginctl = lambda *a: "Active=yes\nLockedHint=no"
+            E.screen_locked = lambda: True
+            self.assertFalse(E.session_active("2"))
         finally:
-            E._loginctl = real
+            E._loginctl, E.screen_locked = real, real_lock
+
+    def test_screen_locked_asks_the_lockers(self):
+        real = E._run_quiet
+        try:
+            E._run_quiet = lambda cmd: "true" if cmd[0] == "omarchy-shell" else None
+            self.assertTrue(E.screen_locked())
+            E._run_quiet = lambda cmd: "4242" if cmd[0] == "pgrep" else "false"
+            self.assertTrue(E.screen_locked())
+            E._run_quiet = lambda cmd: "false" if cmd[0] == "omarchy-shell" else None
+            self.assertFalse(E.screen_locked())
+        finally:
+            E._run_quiet = real
+
+
+class SeatTest(unittest.TestCase):
+    """Multiseat: only keyboards on the recorder's own seat are read."""
+
+    def setUp(self):
+        self.dir = tempfile.TemporaryDirectory()
+        self.saved = E.UDEV_DATA
+        E.UDEV_DATA = self.dir.name
+        rdev = os.stat("/dev/null").st_rdev  # any character device will do
+        self.data = os.path.join(self.dir.name, "c%d:%d" % (os.major(rdev), os.minor(rdev)))
+
+    def tearDown(self):
+        E.UDEV_DATA = self.saved
+        self.dir.cleanup()
+
+    def tag(self, *lines):
+        with open(self.data, "w") as fh:
+            fh.write("\n".join(("I:1", "E:ID_INPUT=1") + lines) + "\n")
+
+    def test_untagged_device_is_seat0(self):
+        self.tag()
+        self.assertEqual(E.device_seat("/dev/null"), "seat0")
+
+    def test_tagged_device(self):
+        self.tag("E:ID_SEAT=seat1")
+        self.assertEqual(E.device_seat("/dev/null"), "seat1")
+
+    def test_missing_device(self):
+        self.assertIsNone(E.device_seat("/dev/input/does-not-exist"))
+
+    @unittest.skipUnless(importlib.util.find_spec("evdev"), "python-evdev not installed")
+    def test_other_seat_is_rejected_unopened(self):
+        self.tag("E:ID_SEAT=seat1")
+        devices, denied, rejected = E.open_keyboards(["/dev/null"], True, seat="seat0")
+        self.assertEqual((devices, denied, rejected), ([], False, ["/dev/null"]))
 
 
 class ProcessTest(unittest.TestCase):
@@ -427,7 +480,7 @@ class RecordLoopTest(unittest.TestCase):
         E.RESCAN_SECONDS = 0.2
         real_glob, real_open = E.glob.glob, E.open_keyboards
         E.glob.glob = lambda pattern: ["/dev/input/event90", "/dev/input/event92"]
-        E.open_keyboards = lambda paths, explicit, skip=(): (
+        E.open_keyboards = lambda paths, explicit, skip=(), seat=None: (
             [late] if "/dev/input/event92" in paths else [], False, [])
         try:
             stats = self.run_loop([first], 1.2, hotplug=True)

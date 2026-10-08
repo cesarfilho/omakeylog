@@ -74,12 +74,22 @@ It never keeps the order of your keypresses, never stores a timestamp per key,
 never records which window had focus, and never sends anything over the
 network.
 
-It only counts **your own typing**. Keyboards are shared by every login on the
-machine, so the recorder checks with logind once a second and counts only while
-your session is the active one and not locked (`Active=yes`,
-`LockedHint=no`). If another user switches to their session, or your screen
-locker reports the lock, counting pauses and the panel says so. When logind
-cannot be asked, nothing is counted.
+It only counts **your own typing**:
+
+- **Your seat only.** On a multiseat machine each seat has its own keyboards
+  and its own user. The recorder asks logind for its session's seat and opens
+  only the keyboards udev assigns to that seat (`ID_SEAT`, `seat0` when
+  untagged), including ones plugged in later.
+- **Your session only, unlocked.** Once a second it checks that its session is
+  the active one on the seat (`Active=yes`) and that the screen is not locked.
+  Lock state comes from logind's `LockedHint` and, because Omarchy's lock
+  screen and hyprlock don't report it there, from the lockers themselves
+  (`omarchy-shell lock isLocked`, a running `hyprlock`). While another user's
+  session is in front or the screen is locked, keys are read and thrown away,
+  so the password you type to unlock is never counted, and the panel shows
+  **Paused**.
+- **Fails closed.** Without a logind session that has a seat, recording does
+  not start; if logind cannot be asked, nothing is counted.
 
 Everything it writes is private to you: the data folder is created `0700` and
 every file `0600`, whatever your umask. Files left by version 1.0 are tightened
@@ -370,12 +380,12 @@ enough.
 `omarchy pkg add python-evdev`. If it is already installed, check that the
 system interpreter sees it: `/usr/bin/python3 -c 'import evdev'`.
 
-**"No keyboard devices found".** No device reported letter keys and a space
-bar. List them with `ls -l /dev/input/by-id/` and pass yours explicitly:
+**"No keyboard devices found on seat0".** No device on your seat reported
+letter keys and a space bar. List them with `ls -l /dev/input/by-id/` and pass yours explicitly:
 `engine/omakeylog record --device /dev/input/eventN`.
 
 **The panel says "Paused".** Your session is not the active one on the seat,
-or it is locked. Counting continues as soon as you are back. If it stays paused
+or the screen is locked. Counting continues as soon as you are back. If it stays paused
 while you are at your desktop, check `loginctl show-session "$XDG_SESSION_ID" -p Active -p LockedHint`.
 
 **Recording did not resume after a reboot.** It only resumes if it was on when

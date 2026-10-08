@@ -516,13 +516,51 @@ def _is_keyboard(dev):
             and evdev.ecodes.KEY_SPACE in keys)
 
 
-def open_keyboards(paths, explicit, skip=()):
-    """Open the keyboards among paths. Returns (devices, denied, rejected)."""
+UDEV_DATA = "/run/udev/data"
+
+
+def device_seat(path):
+    """The logind seat a /dev/input node belongs to, or None if unknown.
+
+    udev tags devices with ID_SEAT; an untagged device belongs to seat0.
+    """
+    try:
+        rdev = os.stat(path).st_rdev
+    except OSError:
+        return None
+    data = os.path.join(UDEV_DATA, "c%d:%d" % (os.major(rdev), os.minor(rdev)))
+    try:
+        with open(data) as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        try:
+            r = subprocess.run(["udevadm", "info", "--query=property", "--name=" + path],
+                               capture_output=True, text=True, timeout=3)
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if r.returncode != 0:
+            return None
+        lines = ["E:" + line for line in r.stdout.splitlines()]
+    for line in lines:
+        if line.startswith("E:ID_SEAT="):
+            return line.split("=", 1)[1] or "seat0"
+    return "seat0"
+
+
+def open_keyboards(paths, explicit, skip=(), seat=None):
+    """Open the keyboards among paths that sit on `seat`.
+
+    Returns (devices, denied, rejected). On a multiseat machine another seat's
+    keyboard belongs to someone else, so it is rejected even when readable.
+    """
     import evdev
 
     devices, denied, rejected = [], False, []
     for path in paths:
         if path in skip:
+            continue
+        if device_seat(path) != seat:
+            rejected.append(path)
             continue
         try:
             dev = evdev.InputDevice(path)
@@ -574,6 +612,31 @@ def _loginctl(*args):
     return r.stdout.strip() if r.returncode == 0 else None
 
 
+def session_seat(sid):
+    """The seat of session sid ("seat0"), or None for a seat-less session."""
+    if not sid:
+        return None
+    return _loginctl("show-session", sid, "-p", "Seat", "--value") or None
+
+
+def _run_quiet(cmd):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def screen_locked():
+    """True when a screen locker is up. Not every locker reports LockedHint to
+    logind (Omarchy's own lock screen does not), so ask the lockers directly."""
+    if _run_quiet(["omarchy-shell", "lock", "isLocked"]) == "true":
+        return True
+    if _run_quiet(["pgrep", "-u", str(os.getuid()), "-x", "hyprlock"]):
+        return True
+    return False
+
+
 def session_id():
     """The logind session this recorder belongs to."""
     sid = os.environ.get("XDG_SESSION_ID")
@@ -595,7 +658,9 @@ def session_active(sid):
     if out is None:
         return False
     props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
-    return props.get("Active") == "yes" and props.get("LockedHint") != "yes"
+    if props.get("Active") != "yes" or props.get("LockedHint") == "yes":
+        return False
+    return not screen_locked()
 
 
 def do_record(args):
@@ -620,35 +685,36 @@ def do_record(args):
         sys.stderr.write("omakeylog: already recording\n")
         return 0
 
-    # Glob directly rather than evdev.list_devices(), which silently omits
-    # devices the process cannot open - we want to see the PermissionError so a
-    # missing 'input' group is reported as such instead of "no keyboard".
-    paths = explicit or sorted(glob.glob("/dev/input/event*"))
-    devices, denied, rejected = open_keyboards(paths, bool(explicit))
-    if not devices:
-        msg = (
-            "no read access to /dev/input (add yourself to the 'input' group)"
-            if denied
-            else "no keyboard devices found"
-        )
+    def fail(msg):
         _write_status(False, [], msg, sum(load_stats().get("keys", {}).values()))
         sys.stderr.write("omakeylog: " + msg + "\n")
         return 1
 
+    # Typing is attributed through logind: the recorder's own session, and only
+    # the keyboards on that session's seat.
     sid = session_id()
-    if not sid:
-        for dev in devices:
-            dev.close()
-        msg = "no login session found (logind), so typing cannot be attributed to you"
-        _write_status(False, [], msg, sum(load_stats().get("keys", {}).values()))
-        sys.stderr.write("omakeylog: " + msg + "\n")
-        return 1
+    seat = session_seat(sid)
+    if not sid or not seat:
+        return fail("no graphical login session with a seat (logind), "
+                    "so typing cannot be attributed to you")
+
+    # Glob directly rather than evdev.list_devices(), which silently omits
+    # devices the process cannot open - we want to see the PermissionError so a
+    # missing 'input' group is reported as such instead of "no keyboard".
+    paths = explicit or sorted(glob.glob("/dev/input/event*"))
+    devices, denied, rejected = open_keyboards(paths, bool(explicit), seat=seat)
+    if not devices:
+        return fail(
+            "no read access to /dev/input (add yourself to the 'input' group)"
+            if denied
+            else "no keyboard devices found on " + seat
+        )
 
     _set_wanted(True)
     if not foreground:
         _daemonize()
 
-    _run_loop(devices, hotplug=not explicit, rejected=rejected, session=sid)
+    _run_loop(devices, hotplug=not explicit, rejected=rejected, session=sid, seat=seat)
     return 0
 
 
@@ -672,7 +738,7 @@ def _daemonize():
         os.dup2(devnull, fd)
 
 
-def _run_loop(devices, hotplug=True, rejected=(), session=None):
+def _run_loop(devices, hotplug=True, rejected=(), session=None, seat="seat0"):
     import selectors
     import evdev
 
@@ -717,7 +783,7 @@ def _run_loop(devices, hotplug=True, rejected=(), session=None):
         new = sorted(present - set(open_paths) - rejected)
         if not new:
             return False
-        found, _denied, rej = open_keyboards(new, False)
+        found, _denied, rej = open_keyboards(new, False, seat=seat)
         rejected.update(rej)
         for dev in found:
             sel.register(dev, selectors.EVENT_READ)
