@@ -26,6 +26,13 @@ id=$(jq -r '.id // ""' manifest.json)
 [[ $id =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ && $id != *..* ]] || err "invalid plugin id '$id'"
 [[ $id != omarchy.* ]] || err "plugin id '$id' uses the reserved omarchy.* namespace"
 
+# Field length limits enforced by the marketplace catalog builder.
+for pair in id:128 name:120 version:64 author:120 description:500 license:120; do
+  field=${pair%%:*} limit=${pair##*:}
+  len=$(jq -r --arg f "$field" '.[$f] // "" | length' manifest.json)
+  (( len <= limit )) || err "manifest '$field' is $len characters; the marketplace allows $limit"
+done
+
 version=$(jq -r '.version // ""' manifest.json)
 [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || err "version '$version' is not MAJOR.MINOR.PATCH"
 
