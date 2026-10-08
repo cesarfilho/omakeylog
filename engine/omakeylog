@@ -1,0 +1,589 @@
+#!/usr/bin/python3
+"""omakeylog capture engine.
+
+Counts how often each key and each adjacent key-pair is pressed, so the data
+can drive a QMK keymap (home-row placement, thumb/layer keys, less travel).
+
+Privacy: it stores ONLY aggregate numbers - a per-key count dict and an
+adjacent-pair (bigram) count dict. It never keeps an ordered sequence, never
+timestamps individual keys, and never records which window had focus, so the
+typed text cannot be reconstructed from what it writes.
+
+Subcommands:
+  record [--device PATH ...] [--foreground]   start counting (daemonizes)
+  stop                                         stop the running recorder
+  status                                       print JSON status
+  report [--json | --csv]                      analyse stats for QMK
+  reset                                        back up and clear the counts
+
+All data lives in ~/.local/share/omakeylog/.
+"""
+
+import json
+import os
+import signal
+import sys
+import time
+
+DATA_DIR = os.path.join(
+    os.environ.get("XDG_DATA_HOME", os.path.expanduser("~/.local/share")),
+    "omakeylog",
+)
+STATS = os.path.join(DATA_DIR, "stats.json")
+REPORT = os.path.join(DATA_DIR, "report.json")
+STATUS = os.path.join(DATA_DIR, "status.json")
+PIDFILE = os.path.join(DATA_DIR, "omakeylog.pid")
+
+# Pairs typed further apart than this (seconds) are not counted as a bigram;
+# that keeps idle pauses from inventing meaningless transitions.
+BIGRAM_GAP = 1.5
+FLUSH_SECONDS = 5.0
+
+# ---------------------------------------------------------------------------
+# QWERTY fingering. label -> (hand, finger, row)
+#   hand:   "L" | "R" | "T" (thumb)
+#   finger: pinky | ring | middle | index | thumb
+#   row:    3 number, 2 top, 1 home, 0 bottom, -1 n/a
+# ---------------------------------------------------------------------------
+FINGER_MAP = {}
+
+
+def _fill(labels, hand, finger, row):
+    for lbl in labels.split():
+        FINGER_MAP[lbl] = (hand, finger, row)
+
+
+# number row (3)
+_fill("GRAVE 1", "L", "pinky", 3)
+_fill("2", "L", "ring", 3)
+_fill("3", "L", "middle", 3)
+_fill("4 5", "L", "index", 3)
+_fill("6 7", "R", "index", 3)
+_fill("8", "R", "middle", 3)
+_fill("9", "R", "ring", 3)
+_fill("0 MINUS EQUAL BACKSPACE", "R", "pinky", 3)
+# top row (2)
+_fill("TAB Q", "L", "pinky", 2)
+_fill("W", "L", "ring", 2)
+_fill("E", "L", "middle", 2)
+_fill("R T", "L", "index", 2)
+_fill("Y U", "R", "index", 2)
+_fill("I", "R", "middle", 2)
+_fill("O", "R", "ring", 2)
+_fill("P LEFTBRACE RIGHTBRACE BACKSLASH", "R", "pinky", 2)
+# home row (1)
+_fill("CAPSLOCK A", "L", "pinky", 1)
+_fill("S", "L", "ring", 1)
+_fill("D", "L", "middle", 1)
+_fill("F G", "L", "index", 1)
+_fill("H J", "R", "index", 1)
+_fill("K", "R", "middle", 1)
+_fill("L", "R", "ring", 1)
+_fill("SEMICOLON APOSTROPHE ENTER", "R", "pinky", 1)
+# bottom row (0)
+_fill("LEFTSHIFT Z", "L", "pinky", 0)
+_fill("X", "L", "ring", 0)
+_fill("C", "L", "middle", 0)
+_fill("V B", "L", "index", 0)
+_fill("N M", "R", "index", 0)
+_fill("COMMA", "R", "middle", 0)
+_fill("DOT", "R", "ring", 0)
+_fill("SLASH RIGHTSHIFT", "R", "pinky", 0)
+# thumbs
+_fill("SPACE", "T", "thumb", -1)
+
+HOME_LABELS = {"A", "S", "D", "F", "G", "H", "J", "K", "L", "SEMICOLON"}
+ROW_NAME = {3: "number", 2: "top", 1: "home", 0: "bottom", -1: "thumb"}
+FINGER_ORDER = [
+    ("L", "pinky"), ("L", "ring"), ("L", "middle"), ("L", "index"),
+    ("T", "thumb"),
+    ("R", "index"), ("R", "middle"), ("R", "ring"), ("R", "pinky"),
+]
+
+
+def finger_of(label):
+    return FINGER_MAP.get(label, ("?", "other", -1))
+
+
+# ---------------------------------------------------------------------------
+# storage helpers
+# ---------------------------------------------------------------------------
+def _ensure_dir():
+    os.makedirs(DATA_DIR, exist_ok=True)
+
+
+def _write_json(path, obj):
+    _ensure_dir()
+    tmp = path + ".tmp"
+    with open(tmp, "w") as fh:
+        json.dump(obj, fh, separators=(",", ":"))
+    os.replace(tmp, path)
+
+
+def _read_json(path, default):
+    try:
+        with open(path) as fh:
+            return json.load(fh)
+    except (OSError, ValueError):
+        return default
+
+
+def load_stats():
+    data = _read_json(STATS, {})
+    return (
+        dict(data.get("keys", {})),
+        dict(data.get("bigrams", {})),
+    )
+
+
+def pid_alive(pid):
+    if not pid:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def read_pid():
+    try:
+        with open(PIDFILE) as fh:
+            return int(fh.read().strip())
+    except (OSError, ValueError):
+        return 0
+
+
+# ---------------------------------------------------------------------------
+# record
+# ---------------------------------------------------------------------------
+def keyboard_devices(explicit):
+    import glob
+    import evdev
+
+    # Glob directly rather than evdev.list_devices(), which silently omits
+    # devices the process cannot open - we want to see the PermissionError so a
+    # missing 'input' group is reported as such instead of "no keyboard".
+    paths = explicit if explicit else sorted(glob.glob("/dev/input/event*"))
+    devices, denied = [], False
+    for path in paths:
+        try:
+            dev = evdev.InputDevice(path)
+        except PermissionError:
+            denied = True
+            continue
+        except OSError:
+            continue
+        keys = dev.capabilities().get(evdev.ecodes.EV_KEY, [])
+        # A real typing keyboard has letters and a space bar; this skips mice,
+        # power buttons, lid switches and other EV_KEY-only devices.
+        if explicit or (
+            evdev.ecodes.KEY_A in keys
+            and evdev.ecodes.KEY_Z in keys
+            and evdev.ecodes.KEY_SPACE in keys
+        ):
+            devices.append(dev)
+        else:
+            dev.close()
+    return devices, denied
+
+
+def label_for(code):
+    import evdev
+
+    name = evdev.ecodes.KEY.get(code)
+    if isinstance(name, (list, tuple)):
+        name = name[0]
+    if not name:
+        return None
+    return name[4:] if name.startswith("KEY_") else name
+
+
+def _write_status(recording, devices, error, total):
+    _write_json(
+        STATUS,
+        {
+            "recording": recording,
+            "pid": os.getpid() if recording else read_pid(),
+            "devices": devices,
+            "error": error,
+            "total": total,
+        },
+    )
+
+
+def do_record(args):
+    explicit = []
+    foreground = False
+    it = iter(args)
+    for a in it:
+        if a == "--device":
+            explicit.append(next(it, ""))
+        elif a == "--foreground":
+            foreground = True
+
+    try:
+        import evdev  # noqa: F401
+    except ImportError:
+        _ensure_dir()
+        _write_status(False, [], "python-evdev is not installed", 0)
+        sys.stderr.write("omakeylog: python-evdev is not installed\n")
+        return 1
+
+    if pid_alive(read_pid()):
+        sys.stderr.write("omakeylog: already recording\n")
+        return 0
+
+    devices, denied = keyboard_devices([p for p in explicit if p])
+    if not devices:
+        _ensure_dir()
+        msg = (
+            "no read access to /dev/input (add yourself to the 'input' group)"
+            if denied
+            else "no keyboard devices found"
+        )
+        _write_status(False, [], msg, sum(load_stats()[0].values()))
+        sys.stderr.write("omakeylog: " + msg + "\n")
+        return 1
+
+    if not foreground:
+        _daemonize()
+
+    _run_loop(devices)
+    return 0
+
+
+def _daemonize():
+    if os.fork() > 0:
+        os._exit(0)
+    os.setsid()
+    if os.fork() > 0:
+        os._exit(0)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    devnull = os.open(os.devnull, os.O_RDWR)
+    for fd in (0, 1, 2):
+        os.dup2(devnull, fd)
+
+
+def _run_loop(devices):
+    import selectors
+    import evdev
+
+    _ensure_dir()
+    with open(PIDFILE, "w") as fh:
+        fh.write(str(os.getpid()))
+
+    keys, bigrams = load_stats()
+    dev_names = [d.name for d in devices]
+    running = {"on": True}
+
+    def stop(_signo, _frame):
+        running["on"] = False
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+
+    sel = selectors.DefaultSelector()
+    for dev in devices:
+        sel.register(dev, selectors.EVENT_READ)
+
+    prev_label = None
+    prev_time = 0.0
+    dirty = False
+    last_flush = time.monotonic()
+
+    def flush():
+        _write_json(STATS, {
+            "version": 1,
+            "updated": int(time.time()),
+            "keys": keys,
+            "bigrams": bigrams,
+        })
+        _write_status(True, dev_names, None, sum(keys.values()))
+
+    flush()
+    while running["on"]:
+        for selkey, _ in sel.select(timeout=1.0):
+            try:
+                events = list(selkey.fileobj.read())
+            except OSError:
+                continue
+            for ev in events:
+                if ev.type != evdev.ecodes.EV_KEY or ev.value != 1:
+                    continue
+                label = label_for(ev.code)
+                if not label:
+                    continue
+                keys[label] = keys.get(label, 0) + 1
+                now = time.monotonic()
+                if prev_label and (now - prev_time) < BIGRAM_GAP:
+                    pair = prev_label + ">" + label
+                    bigrams[pair] = bigrams.get(pair, 0) + 1
+                prev_label = label
+                prev_time = now
+                dirty = True
+        now = time.monotonic()
+        if dirty and now - last_flush >= FLUSH_SECONDS:
+            flush()
+            dirty = False
+            last_flush = now
+
+    flush()
+    _write_status(False, dev_names, None, sum(keys.values()))
+    try:
+        os.remove(PIDFILE)
+    except OSError:
+        pass
+
+
+# ---------------------------------------------------------------------------
+# stop / status
+# ---------------------------------------------------------------------------
+def do_stop(_args):
+    pid = read_pid()
+    if not pid_alive(pid):
+        try:
+            os.remove(PIDFILE)
+        except OSError:
+            pass
+        return 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except OSError:
+        pass
+    return 0
+
+
+def do_status(_args):
+    pid = read_pid()
+    recording = pid_alive(pid)
+    saved = _read_json(STATUS, {})
+    keys = load_stats()[0]
+    status = {
+        "recording": recording,
+        "pid": pid if recording else 0,
+        "devices": saved.get("devices", []) if recording else [],
+        "error": saved.get("error") if not recording else None,
+        "total": sum(keys.values()),
+        "distinct": len(keys),
+    }
+    _write_json(STATUS, status)
+    print(json.dumps(status))
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# report
+# ---------------------------------------------------------------------------
+def build_report():
+    keys, bigrams = load_stats()
+    total = sum(keys.values())
+    ranked = sorted(keys.items(), key=lambda kv: kv[1], reverse=True)
+
+    def pct(n):
+        return round(100.0 * n / total, 2) if total else 0.0
+
+    top_keys = [{"label": k, "count": c, "pct": pct(c)} for k, c in ranked]
+
+    hands = {"L": 0, "R": 0, "T": 0, "?": 0}
+    fingers = {fp: 0 for fp in FINGER_ORDER}
+    rows = {name: 0 for name in ROW_NAME.values()}
+    rows["other"] = 0
+    for label, count in keys.items():
+        hand, finger, row = finger_of(label)
+        hands[hand] = hands.get(hand, 0) + count
+        if (hand, finger) in fingers:
+            fingers[(hand, finger)] += count
+        rows[ROW_NAME.get(row, "other")] += count
+
+    finger_load = [
+        {"finger": h + "-" + f, "pct": pct(fingers[(h, f)]), "count": fingers[(h, f)]}
+        for (h, f) in FINGER_ORDER
+    ]
+
+    bi_ranked = sorted(bigrams.items(), key=lambda kv: kv[1], reverse=True)
+    bi_total = sum(bigrams.values())
+    top_bigrams = [{"pair": p.replace(">", " "), "count": c} for p, c in bi_ranked]
+
+    sfb_items = []
+    sfb_count = 0
+    for pair, count in bi_ranked:
+        a, _, b = pair.partition(">")
+        if a == b:
+            continue
+        fa, fb = finger_of(a), finger_of(b)
+        if fa[0] == fb[0] and fa[1] == fb[1] and fa[0] in ("L", "R"):
+            sfb_count += count
+            sfb_items.append({"pair": pair.replace(">", " "), "count": count})
+
+    suggestions = _suggestions(ranked, total, fingers, pct, sfb_count, bi_total)
+
+    return {
+        "total": total,
+        "distinct": len(keys),
+        "top_keys": top_keys,
+        "hands": {
+            "left": pct(hands.get("L", 0)),
+            "right": pct(hands.get("R", 0)),
+            "thumb": pct(hands.get("T", 0)),
+            "other": pct(hands.get("?", 0)),
+        },
+        "fingers": finger_load,
+        "rows": {k: pct(v) for k, v in rows.items()},
+        "top_bigrams": top_bigrams,
+        "sfb": {
+            "pct": round(100.0 * sfb_count / bi_total, 2) if bi_total else 0.0,
+            "top": sfb_items[:10],
+        },
+        "suggestions": suggestions,
+    }
+
+
+def _suggestions(ranked, total, fingers, pct, sfb_count, bi_total):
+    out = []
+    if total == 0:
+        return ["No data yet. Start recording and type for a while."]
+
+    off_home = [
+        (k, c) for k, c in ranked
+        if k not in HOME_LABELS and finger_of(k)[2] in (0, 2) and len(k) == 1
+    ][:5]
+    if off_home:
+        names = ", ".join("%s (%s%%)" % (k, pct(c)) for k, c in off_home)
+        out.append(
+            "Frequent keys off the home row - consider a layer/home-row-mod or "
+            "relocating them: " + names
+        )
+
+    big = [(k, c) for k, c in ranked[:8] if finger_of(k)[0] in ("L", "R")]
+    if big:
+        names = ", ".join("%s (%s%%)" % (k, pct(c)) for k, c in big)
+        out.append("Most-pressed keys overall (prime real estate): " + names)
+
+    heavy = [
+        (h + "-" + f, pct(fingers[(h, f)]))
+        for (h, f) in FINGER_ORDER
+        if (h, f) in fingers and pct(fingers[(h, f)]) >= 18.0
+        and f not in ("index", "thumb")
+    ]
+    for name, p in heavy:
+        out.append("%s is carrying %s%% of presses - spread that load." % (name, p))
+
+    idle = [
+        h + "-" + f
+        for (h, f) in FINGER_ORDER
+        if f not in ("thumb", "index") and pct(fingers[(h, f)]) < 2.0
+    ]
+    if idle:
+        out.append("Underused fingers you could give more to: " + ", ".join(idle))
+
+    if bi_total:
+        sfb_pct = round(100.0 * sfb_count / bi_total, 2)
+        if sfb_pct >= 3.0:
+            out.append(
+                "Same-finger bigrams are %s%% of pairs - a layout that separates "
+                "those letters onto different fingers would type smoother." % sfb_pct
+            )
+    return out
+
+
+def do_report(args):
+    rep = build_report()
+    if "--json" in args:
+        _write_json(REPORT, rep)
+        print(json.dumps(rep))
+        return 0
+    if "--csv" in args:
+        print("key,count,percent")
+        for row in rep["top_keys"]:
+            print("%s,%d,%s" % (row["label"], row["count"], row["pct"]))
+        return 0
+    _print_human(rep)
+    # keep report.json fresh for the UI even on a plain report
+    _write_json(REPORT, rep)
+    return 0
+
+
+def _bar(pct, width=24):
+    filled = int(round(pct / 100.0 * width))
+    return "#" * filled + "." * (width - filled)
+
+
+def _print_human(rep):
+    if rep["total"] == 0:
+        print("No keypresses recorded yet. Run 'omakeylog record' and type.")
+        return
+    print("omakeylog report  -  %d keypresses, %d distinct keys\n"
+          % (rep["total"], rep["distinct"]))
+
+    print("Top keys:")
+    for row in rep["top_keys"][:20]:
+        print("  %-12s %7d  %5s%%  %s"
+              % (row["label"], row["count"], row["pct"], _bar(row["pct"])))
+
+    h = rep["hands"]
+    print("\nHand balance:  left %s%%   right %s%%   thumb %s%%"
+          % (h["left"], h["right"], h["thumb"]))
+
+    print("\nFinger load:")
+    for row in rep["fingers"]:
+        print("  %-10s %5s%%  %s" % (row["finger"], row["pct"], _bar(row["pct"])))
+
+    r = rep["rows"]
+    print("\nRow usage:  home %s%%   top %s%%   bottom %s%%   number %s%%   thumb %s%%"
+          % (r.get("home", 0), r.get("top", 0), r.get("bottom", 0),
+             r.get("number", 0), r.get("thumb", 0)))
+
+    print("\nTop key-pairs:")
+    for row in rep["top_bigrams"][:15]:
+        print("  %-10s %7d" % (row["pair"], row["count"]))
+
+    if rep["sfb"]["top"]:
+        print("\nSame-finger bigrams (%s%% of pairs) - minimize these:"
+              % rep["sfb"]["pct"])
+        for row in rep["sfb"]["top"]:
+            print("  %-10s %7d" % (row["pair"], row["count"]))
+
+    print("\nQMK suggestions:")
+    for s in rep["suggestions"]:
+        print("  - " + s)
+
+
+# ---------------------------------------------------------------------------
+# reset
+# ---------------------------------------------------------------------------
+def do_reset(_args):
+    if os.path.exists(STATS):
+        backup = STATS + "." + time.strftime("%Y%m%d-%H%M%S") + ".bak"
+        os.replace(STATS, backup)
+        print("backed up previous stats to " + backup)
+    for path in (REPORT, STATUS):
+        try:
+            os.remove(path)
+        except OSError:
+            pass
+    print("counts reset")
+    return 0
+
+
+COMMANDS = {
+    "record": do_record,
+    "stop": do_stop,
+    "status": do_status,
+    "report": do_report,
+    "reset": do_reset,
+}
+
+
+def main(argv):
+    if not argv or argv[0] not in COMMANDS:
+        sys.stderr.write(__doc__)
+        return 2
+    return COMMANDS[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))

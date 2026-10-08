@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.cesarfilho.omakeylog",
+  "name": "Omakeylog",
+  "version": "1.0.0",
+  "author": "cesarfilho",
+  "license": "MIT",
+  "description": "Measures how often you press each key and each adjacent key-pair, to help you design a better QMK keymap (home-row placement, thumb/layer keys, less finger travel). It records aggregate counts only - never the text you type - and shows ranked keys, hand and finger load, same-finger bigrams and QMK suggestions in a panel. A bundled evdev engine does the counting; the bar widget starts and stops it.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Omakeylog",
+    "description": "Key-frequency analyzer for QMK layout tuning: records per-key and bigram counts (no text), shows ranked keys, hand/finger load, same-finger bigrams and layout suggestions.",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showLabel": false,
+      "labelMode": "Total",
+      "topKeys": 12,
+      "topBigrams": 10,
+      "refreshIntervalSec": 3
+    },
+    "schema": [
+      {
+        "key": "showLabel",
+        "type": "boolean",
+        "label": "Show the keypress total next to the icon",
+        "defaultValue": false
+      },
+      {
+        "key": "labelMode",
+        "type": "enum",
+        "label": "Bar label",
+        "options": [
+          "Total",
+          "Top key"
+        ],
+        "defaultValue": "Total",
+        "description": "Total shows how many keypresses are recorded; Top key shows your most-pressed key."
+      },
+      {
+        "key": "topKeys",
+        "type": "integer",
+        "label": "Keys shown in the panel",
+        "min": 5,
+        "max": 40,
+        "step": 1,
+        "defaultValue": 12
+      },
+      {
+        "key": "topBigrams",
+        "type": "integer",
+        "label": "Key-pairs shown in the panel",
+        "min": 5,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 10
+      },
+      {
+        "key": "refreshIntervalSec",
+        "type": "integer",
+        "label": "Refresh interval while the panel is open (seconds)",
+        "min": 1,
+        "max": 30,
+        "step": 1,
+        "defaultValue": 3
+      }
+    ]
+  },
+  "omarchy": {
+    "clonePaths": [
+      {
+        "source": "Model.js",
+        "target": "Model.js"
+      },
+      {
+        "source": "engine/omakeylog",
+        "target": "engine/omakeylog"
+      }
+    ]
+  }
+}
