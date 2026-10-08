@@ -33,6 +33,7 @@ import math
 import os
 import re
 import signal
+import subprocess
 import sys
 import time
 
@@ -57,6 +58,8 @@ SEQUENCE_GAP = 1.5
 FLUSH_SECONDS = 5.0
 # How often the recorder looks for keyboards plugged in after it started.
 RESCAN_SECONDS = 3.0
+# How often it checks that its login session is still the active, unlocked one.
+SESSION_CHECK_SECONDS = 1.0
 # Hold and overlap histograms: 10 ms buckets, everything >= 1 s in one bucket.
 BUCKET_MS = 10
 BUCKET_CAP_MS = 1000
@@ -142,16 +145,37 @@ FINGER_RANK = {"pinky": 0, "ring": 1, "middle": 2, "index": 3, "thumb": 4}
 # ---------------------------------------------------------------------------
 # storage helpers
 # ---------------------------------------------------------------------------
+# Counts are private: only the owner may read them, whatever the umask.
 def _ensure_dir(path=None):
-    os.makedirs(path or DATA_DIR, exist_ok=True)
+    path = path or DATA_DIR
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def _write_private(path, text):
+    _ensure_dir(os.path.dirname(path))
+    tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.fchmod(fd, 0o600)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(text)
+    os.replace(tmp, path)
 
 
 def _write_json(path, obj):
-    _ensure_dir(os.path.dirname(path))
-    tmp = path + ".tmp"
-    with open(tmp, "w") as fh:
-        json.dump(obj, fh, separators=(",", ":"))
-    os.replace(tmp, path)
+    _write_private(path, json.dumps(obj, separators=(",", ":")))
+
+
+def secure_existing():
+    """Tighten files written by 1.0, which followed the umask (often 0644)."""
+    for d in (DATA_DIR, CONFIG_DIR):
+        if not os.path.isdir(d):
+            continue
+        os.chmod(d, 0o700)
+        for name in os.listdir(d):
+            path = os.path.join(d, name)
+            if os.path.isfile(path) and not os.path.islink(path):
+                os.chmod(path, 0o600)
 
 
 def _read_json(path, default):
@@ -526,15 +550,52 @@ def label_for(code):
     return name[4:] if name.startswith("KEY_") else name
 
 
-def _write_status(recording, devices, error, total):
+def _write_status(recording, devices, error, total, paused=False):
     _write_json(STATUS, {
         "recording": recording,
+        "paused": paused,
         "pid": os.getpid() if recording else 0,
         "devices": devices,
         "error": error,
         "total": total,
         "wanted": _wanted(),
     })
+
+
+# ---------------------------------------------------------------------------
+# session - count only the owner's own typing
+# ---------------------------------------------------------------------------
+def _loginctl(*args):
+    try:
+        r = subprocess.run(["loginctl"] + list(args), capture_output=True,
+                           text=True, timeout=3)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
+def session_id():
+    """The logind session this recorder belongs to."""
+    sid = os.environ.get("XDG_SESSION_ID")
+    if sid:
+        return sid
+    return _loginctl("show-user", str(os.getuid()), "-p", "Display", "--value") or None
+
+
+def session_active(sid):
+    """True only while sid is the foreground session on its seat and unlocked.
+
+    The keyboards are shared by every session on the seat, so when another user
+    switches to their session (or the screen is locked) keys must not be
+    counted. Anything that cannot be confirmed counts as inactive.
+    """
+    if not sid:
+        return False
+    out = _loginctl("show-session", sid, "-p", "Active", "-p", "LockedHint")
+    if out is None:
+        return False
+    props = dict(line.split("=", 1) for line in out.splitlines() if "=" in line)
+    return props.get("Active") == "yes" and props.get("LockedHint") != "yes"
 
 
 def do_record(args):
@@ -574,11 +635,20 @@ def do_record(args):
         sys.stderr.write("omakeylog: " + msg + "\n")
         return 1
 
+    sid = session_id()
+    if not sid:
+        for dev in devices:
+            dev.close()
+        msg = "no login session found (logind), so typing cannot be attributed to you"
+        _write_status(False, [], msg, sum(load_stats().get("keys", {}).values()))
+        sys.stderr.write("omakeylog: " + msg + "\n")
+        return 1
+
     _set_wanted(True)
     if not foreground:
         _daemonize()
 
-    _run_loop(devices, hotplug=not explicit, rejected=rejected)
+    _run_loop(devices, hotplug=not explicit, rejected=rejected, session=sid)
     return 0
 
 
@@ -602,13 +672,11 @@ def _daemonize():
         os.dup2(devnull, fd)
 
 
-def _run_loop(devices, hotplug=True, rejected=()):
+def _run_loop(devices, hotplug=True, rejected=(), session=None):
     import selectors
     import evdev
 
-    _ensure_dir()
-    with open(PIDFILE, "w") as fh:
-        fh.write(str(os.getpid()))
+    _write_private(PIDFILE, str(os.getpid()))
 
     tally = Tally(load_stats())
     running = {"on": True}
@@ -657,11 +725,13 @@ def _run_loop(devices, hotplug=True, rejected=()):
         return bool(found)
 
     dirty = False
-    last_flush = last_scan = time.monotonic()
+    last_flush = last_scan = last_session = time.monotonic()
+    active = {"on": session_active(session)}
 
     def flush():
         _write_json(STATS, tally.to_dict())
-        _write_status(True, names(), None, sum(tally.keys.values()))
+        _write_status(True, names(), None, sum(tally.keys.values()),
+                      paused=not active["on"])
 
     flush()
     while running["on"]:
@@ -673,6 +743,8 @@ def _run_loop(devices, hotplug=True, rejected=()):
                 drop(dev)
                 dirty = True
                 continue
+            if not active["on"]:
+                continue  # drained and discarded: not this user's typing
             for ev in events:
                 # 1 press, 0 release; 2 (auto-repeat) is not a new keypress
                 if ev.type != evdev.ecodes.EV_KEY or ev.value == 2:
@@ -687,6 +759,13 @@ def _run_loop(devices, hotplug=True, rejected=()):
                     tally.release(label, now)
                 dirty = True
         now = time.monotonic()
+        if now - last_session >= SESSION_CHECK_SECONDS:
+            last_session = now
+            was, active["on"] = active["on"], session_active(session)
+            if was != active["on"]:
+                tally.drop_held()
+                dirty = True
+                last_flush = 0  # show the pause in the panel right away
         if hotplug and now - last_scan >= RESCAN_SECONDS:
             last_scan = now
             if rescan():
@@ -730,6 +809,7 @@ def do_status(_args):
     keys = load_stats().get("keys", {})
     status = {
         "recording": recording,
+        "paused": bool(saved.get("paused")) if recording else False,
         "pid": pid if recording else 0,
         "devices": saved.get("devices", []) if recording else [],
         "error": saved.get("error") if not recording else None,
@@ -1238,6 +1318,8 @@ def main(argv):
     if not argv or argv[0] not in COMMANDS:
         sys.stderr.write(__doc__)
         return 2
+    os.umask(0o077)
+    secure_existing()
     return COMMANDS[argv[0]](argv[1:])
 
 

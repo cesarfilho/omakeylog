@@ -26,6 +26,7 @@ var EMPTY_REPORT = {
 
 var EMPTY_STATUS = {
   recording: false,
+  paused: false,
   pid: 0,
   devices: [],
   error: null,

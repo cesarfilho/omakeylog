@@ -19,6 +19,7 @@ BarWidget {
   moduleName: "io.github.cesarfilho.omakeylog"
 
   property bool recording: false
+  property bool paused: false
   property int total: 0
   property int distinct: 0
   property string errorMsg: ""
@@ -50,6 +51,7 @@ BarWidget {
   function applyStatus(text) {
     var s = Model.parseStatus(text)
     recording = s.recording === true
+    paused = recording && s.paused === true
     total = Number(s.total) || 0
     distinct = Number(s.distinct) || 0
     errorMsg = (!recording && s.error) ? String(s.error) : ""
@@ -199,7 +201,9 @@ BarWidget {
     active: root.recording
     useActiveColor: true
     dimmed: !root.recording && root.total === 0
-    tooltipText: root.recording
+    tooltipText: root.paused
+      ? "omakeylog - paused (session not active or locked)"
+      : root.recording
       ? "omakeylog - recording (" + Model.grouped(root.total) + " keys)"
       : (root.total > 0 ? "omakeylog - " + Model.grouped(root.total) + " keys recorded"
                         : "omakeylog - click to record")

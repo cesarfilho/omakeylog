@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.cesarfilho.omakeylog",
   "name": "Omakeylog",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "cesarfilho",
   "license": "MIT",
   "description": "Measures how often you press each key, key-pair and short key sequence, to help you design a better QMK keymap (home-row placement, thumb/layer keys, less finger travel, home-row-mod timing). It records aggregate counts only - never the text you type - and shows a keyboard heatmap, hand and finger load, same-finger pairs, trigram patterns, shortcuts, a suggested TAPPING_TERM and QMK suggestions in a panel. It can map fingers from your own Vial keymap. A bundled evdev engine does the counting; the bar widget starts and stops it.",

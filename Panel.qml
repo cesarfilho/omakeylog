@@ -21,6 +21,7 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   readonly property bool recording: hostWidget ? hostWidget.recording : false
+  readonly property bool paused: hostWidget ? hostWidget.paused : false
   readonly property int total: hostWidget ? hostWidget.total : 0
   readonly property int distinct: hostWidget ? hostWidget.distinct : 0
   readonly property string errorMsg: hostWidget ? hostWidget.errorMsg : ""
@@ -40,6 +41,7 @@ Panel {
 
   readonly property string heroMeta: {
     if (errorMsg !== "") return "Not recording"
+    if (paused) return "Paused - session locked or not active"
     if (recording) return "Recording - " + Model.grouped(total) + " keys"
     if (total > 0) return Model.grouped(total) + " keys on record"
     return "Not recording yet"

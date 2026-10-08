@@ -72,7 +72,18 @@ A key logger is sensitive software, so here is exactly what this one keeps.
 
 It never keeps the order of your keypresses, never stores a timestamp per key,
 never records which window had focus, and never sends anything over the
-network. Totals like "E was pressed 4,812 times" or "T → H → E happened 390
+network.
+
+It only counts **your own typing**. Keyboards are shared by every login on the
+machine, so the recorder checks with logind once a second and counts only while
+your session is the active one and not locked (`Active=yes`,
+`LockedHint=no`). If another user switches to their session, or your screen
+locker reports the lock, counting pauses and the panel says so. When logind
+cannot be asked, nothing is counted.
+
+Everything it writes is private to you: the data folder is created `0700` and
+every file `0600`, whatever your umask. Files left by version 1.0 are tightened
+the next time the engine runs. Totals like "E was pressed 4,812 times" or "T → H → E happened 390
 times" cannot be turned back into the passwords or messages you typed.
 
 To be fully transparent: a triple count does carry a little more than a single
@@ -321,7 +332,7 @@ set it:
 |---|---|
 | `stats.json` | The raw counts and timing histograms (see [Privacy](#privacy)) |
 | `report.json` | The derived analysis the panel displays |
-| `status.json` | Whether recording is on, which devices, last error, totals |
+| `status.json` | Whether recording is on or paused, which devices, last error, totals |
 | `state.json` | Whether recording should resume at the next login |
 | `omakeylog.pid` | Process ID of the running counter (only while recording) |
 | `stats.json.YYYYMMDD-HHMMSS.bak` | Backups made by **Reset**; the newest is the comparison baseline |
@@ -362,6 +373,10 @@ system interpreter sees it: `/usr/bin/python3 -c 'import evdev'`.
 **"No keyboard devices found".** No device reported letter keys and a space
 bar. List them with `ls -l /dev/input/by-id/` and pass yours explicitly:
 `engine/omakeylog record --device /dev/input/eventN`.
+
+**The panel says "Paused".** Your session is not the active one on the seat,
+or it is locked. Counting continues as soon as you are back. If it stays paused
+while you are at your desktop, check `loginctl show-session "$XDG_SESSION_ID" -p Active -p LockedHint`.
 
 **Recording did not resume after a reboot.** It only resumes if it was on when
 the session ended and `resumeRecording` is enabled. Press **Start** once and it

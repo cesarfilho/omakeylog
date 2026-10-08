@@ -244,6 +244,23 @@ class LayoutTest(unittest.TestCase):
             E.layout_from_vil({"nope": 1})
 
 
+class SessionTest(unittest.TestCase):
+    def test_session_active_parsing(self):
+        real = E._loginctl
+        try:
+            E._loginctl = lambda *a: "Active=yes\nLockedHint=no"
+            self.assertTrue(E.session_active("2"))
+            E._loginctl = lambda *a: "Active=no\nLockedHint=no"
+            self.assertFalse(E.session_active("2"))
+            E._loginctl = lambda *a: "Active=yes\nLockedHint=yes"
+            self.assertFalse(E.session_active("2"))
+            E._loginctl = lambda *a: None  # logind unreachable: fail closed
+            self.assertFalse(E.session_active("2"))
+            self.assertFalse(E.session_active(None))
+        finally:
+            E._loginctl = real
+
+
 class ProcessTest(unittest.TestCase):
     def test_pid_alive_rejects_other_processes(self):
         self.assertFalse(E.pid_alive(0))
@@ -258,7 +275,15 @@ class ProcessTest(unittest.TestCase):
                 return subprocess.run([sys.executable, ENGINE] + list(args), env=env,
                                       capture_output=True, text=True)
 
+            os.makedirs(os.path.join(d, "omakeylog"), mode=0o755)
+            loose = os.path.join(d, "omakeylog", "stats.json")
+            with open(loose, "w") as fh:
+                fh.write("{}")
+            os.chmod(loose, 0o644)  # as 1.0 left it
             status = json.loads(run("status").stdout)
+            self.assertEqual(os.stat(loose).st_mode & 0o777, 0o600)
+            self.assertEqual(os.stat(os.path.join(d, "omakeylog")).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(os.path.join(d, "omakeylog", "status.json")).st_mode & 0o777, 0o600)
             self.assertFalse(status["recording"])
             self.assertFalse(status["wanted"])
             self.assertEqual(run("report", "--json").returncode, 0)
@@ -318,6 +343,8 @@ class RecordLoopTest(unittest.TestCase):
             self.saved[name] = getattr(E, name)
             setattr(E, name, os.path.join(self.dir.name, os.path.basename(getattr(E, name))))
         self.saved["RESCAN_SECONDS"] = E.RESCAN_SECONDS
+        self.saved["session_active"] = E.session_active
+        E.session_active = lambda sid: True
 
     def tearDown(self):
         for name, value in self.saved.items():
@@ -360,6 +387,37 @@ class RecordLoopTest(unittest.TestCase):
         self.assertEqual(stats["keys"], {"A": 1})
         self.assertLessEqual(dev.reads, 3)  # dropped after the first error
         other.close()
+
+    def test_inactive_session_counts_nothing(self):
+        # another user's session in front, or the screen locked
+        k = self.ecodes
+        E.session_active = lambda sid: False
+        dev = FakeDevice("/dev/input/event90",
+                         [FakeEvent(k.KEY_A, 1, 0.0), FakeEvent(k.KEY_A, 0, 0.05)])
+        seen = {}
+
+        def peek():
+            import time
+            time.sleep(0.3)
+            with open(E.STATUS) as fh:
+                seen.update(json.load(fh))
+
+        stats = self.run_loop([dev], 0.5, during=peek, hotplug=False)
+        self.assertEqual(stats["keys"], {})
+        self.assertTrue(seen["recording"])
+        self.assertTrue(seen["paused"])
+        dev.close()
+
+    def test_files_are_private(self):
+        dev = FakeDevice("/dev/input/event90")
+        old = os.umask(0o022)
+        try:
+            self.run_loop([dev], 0.5, hotplug=False)
+        finally:
+            os.umask(old)
+        for name in (E.STATS, E.STATUS):
+            self.assertEqual(os.stat(name).st_mode & 0o777, 0o600, name)
+        dev.close()
 
     def test_hotplugged_keyboard_is_picked_up(self):
         k = self.ecodes
