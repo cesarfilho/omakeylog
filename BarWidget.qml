@@ -9,7 +9,7 @@ import "Model.js" as Model
 // The counting happens in a bundled evdev engine (engine/omakeylog), a separate
 // process so the keyboard is read with the user's own input-group access and
 // recording survives a shell reload. The engine only ever stores aggregate
-// counts (per key, and per adjacent key-pair) - never the text that was typed.
+// counts and timing histograms - never the text that was typed.
 //
 // This widget shows how many keypresses are on record, starts and stops the
 // engine, and hosts a panel that renders the ranked keys, hand and finger load,
@@ -31,6 +31,8 @@ BarWidget {
   readonly property bool showLabel: !vertical && setting("showLabel", false) === true
   readonly property string labelMode: String(setting("labelMode", "Total"))
   readonly property int refreshMs: Math.max(1, Number(setting("refreshIntervalSec", 3))) * 1000
+  readonly property bool resumeRecording: setting("resumeRecording", true) !== false
+  readonly property bool compareWithPrevious: setting("compareWithPrevious", true) !== false
 
   readonly property var panelItem: panelLoader.item
   readonly property bool panelOpen: panelItem ? panelItem.opened === true : false
@@ -128,7 +130,9 @@ BarWidget {
 
   Process {
     id: reportProc
-    command: ["/usr/bin/python3", root.engine, "report", "--json"]
+    command: root.compareWithPrevious
+      ? ["/usr/bin/python3", root.engine, "report", "--json"]
+      : ["/usr/bin/python3", root.engine, "report", "--json", "--no-compare"]
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyReport(text)
@@ -142,6 +146,20 @@ BarWidget {
       if (code !== 0) root.errorMsg = "Could not start recording (exit " + code + ")."
       root.refresh()
     }
+  }
+
+  // After a reboot or logout the recorder is gone; start it again if it was
+  // on when the session ended (the engine remembers an explicit Stop).
+  Process {
+    id: resumeProc
+    command: ["/usr/bin/python3", root.engine, "resume"]
+    onExited: root.refresh()
+  }
+  // Short delay so the widget's settings are loaded before they are read.
+  Timer {
+    interval: 1500
+    running: true
+    onTriggered: if (root.resumeRecording) resumeProc.running = true
   }
 
   Process {

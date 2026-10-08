@@ -6,7 +6,8 @@ import "Model.js" as Model
 
 // Popup view for omakeylog. The bar widget (hostWidget) owns the data and the
 // actions; this file only renders what the engine computed into report.json:
-// ranked keys, hand and finger load, same-finger bigrams and QMK suggestions.
+// a keyboard heatmap, ranked keys, hand and finger load, same-finger pairs,
+// trigram patterns, shortcuts, typing timing and QMK suggestions.
 //
 // Keys: S start/stop recording, R refresh, X reset (twice to confirm),
 // Esc close.
@@ -27,6 +28,8 @@ Panel {
 
   readonly property int topKeys: hostWidget ? Math.max(5, Number(hostWidget.setting("topKeys", 12))) : 12
   readonly property int topBigrams: hostWidget ? Math.max(5, Number(hostWidget.setting("topBigrams", 10))) : 10
+  readonly property bool showHeatmap: hostWidget ? hostWidget.setting("showHeatmap", true) !== false : true
+  readonly property var compare: report.compare
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
@@ -68,7 +71,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(420))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(600))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(720))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -175,7 +178,7 @@ Panel {
         Flickable {
           id: flick
           width: parent.width
-          height: Math.min(body.implicitHeight, Style.space(430))
+          height: Math.min(body.implicitHeight, Style.space(560))
           contentWidth: width
           contentHeight: body.implicitHeight
           clip: true
@@ -198,6 +201,92 @@ Panel {
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
+            }
+
+            // Comparison with the recording before the last reset
+            Rectangle {
+              visible: root.total > 0 && root.compare !== null
+              width: parent.width
+              height: visible ? cmpText.implicitHeight + Style.space(12) : 0
+              radius: Style.cornerRadius
+              color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.10)
+              border.width: 1
+              border.color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b, 0.35)
+              Text {
+                id: cmpText
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.margins: Style.space(8)
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: root.compare === null ? "" :
+                  "vs previous recording (" + Model.grouped(root.compare.total) + " keys):  "
+                  + "same-finger pairs " + root.compare.sfb_pct + "% → " + root.report.sfb.pct
+                  + "%  (" + Model.delta(root.compare.sfb_delta) + ")"
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+              }
+            }
+
+            // Heatmap
+            SectionLabel { text: "HEATMAP"; visible: root.total > 0 && root.showHeatmap }
+            Column {
+              id: heat
+              visible: root.total > 0 && root.showHeatmap && root.report.heatmap.length > 0
+              width: parent.width
+              readonly property real units: Math.max(1, Model.gridUnits(root.report.heatmap))
+              readonly property real unit: width / units
+
+              Repeater {
+                model: heat.visible ? root.report.heatmap : []
+                delegate: Row {
+                  id: heatRow
+                  required property var modelData
+                  Repeater {
+                    model: heatRow.modelData
+                    delegate: Item {
+                      id: cap
+                      required property var modelData
+                      width: (Number(cap.modelData.w) || 1) * heat.unit
+                      height: Style.space(24)
+                      Rectangle {
+                        anchors.fill: parent
+                        anchors.margins: 1.5
+                        visible: cap.modelData.label !== ""
+                        radius: 4
+                        color: Qt.rgba(root.accent.r, root.accent.g, root.accent.b,
+                                       0.05 + 0.75 * Number(cap.modelData.heat))
+                        border.width: 1
+                        border.color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
+                        HoverHandler { id: capHover }
+                        Text {
+                          anchors.centerIn: parent
+                          textFormat: Text.PlainText
+                          text: capHover.hovered ? Model.grouped(cap.modelData.count)
+                                                 : Model.capName(cap.modelData.label)
+                          color: root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Math.max(8, Style.font.caption - 2)
+                          font.bold: Number(cap.modelData.heat) > 0.5
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            Text {
+              visible: heat.visible
+              width: parent.width
+              textFormat: Text.PlainText
+              elide: Text.ElideRight
+              text: "Layout: " + root.report.layout.name
+                    + (root.report.layout.source === "default" ? "  ·  import yours with 'layout import-vil'" : "")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
             }
 
             // Top keys
@@ -234,6 +323,7 @@ Panel {
                 name: Model.fingerName(modelData.finger)
                 pct: modelData.pct
                 hideValue: true
+                extra: Model.delta(modelData.delta)
               }
             }
 
@@ -272,6 +362,69 @@ Panel {
                 name: Model.pairName(modelData.pair)
                 value: modelData.count
                 warn: true
+              }
+            }
+
+            // Same-finger skipgrams
+            Text {
+              visible: root.total > 0 && root.report.sfs.top.length > 0
+              width: parent.width
+              textFormat: Text.PlainText
+              wrapMode: Text.Wrap
+              text: "Same-finger skipgrams (one key in between): " + root.report.sfs.pct + "%"
+                    + (root.report.sfs.top.length > 0
+                       ? "  ·  worst: " + root.report.sfs.top.slice(0, 3).map(function(r) {
+                           return Model.pairName(r.pair) }).join(", ")
+                       : "")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+            }
+
+            // Trigram patterns
+            SectionLabel { text: "TRIGRAM PATTERNS"; visible: root.report.trigrams.total > 0 }
+            Column {
+              visible: root.report.trigrams.total > 0
+              width: parent.width
+              spacing: Style.space(2)
+              MeterRow { width: body.width; name: "alternate"; pct: root.report.trigrams.kinds.alternate || 0; hideValue: true }
+              MeterRow { width: body.width; name: "roll";      pct: root.report.trigrams.kinds.roll || 0;      hideValue: true }
+              MeterRow { width: body.width; name: "one-hand";  pct: root.report.trigrams.kinds.onehand || 0;   hideValue: true }
+              MeterRow { width: body.width; name: "redirect";  pct: root.report.trigrams.kinds.redirect || 0;  hideValue: true }
+              MeterRow { width: body.width; name: "same-finger"; pct: root.report.trigrams.kinds.sfb || 0;     hideValue: true }
+            }
+
+            // Shortcuts
+            SectionLabel { text: "TOP SHORTCUTS"; visible: root.report.chords.top.length > 0 }
+            Repeater {
+              model: root.report.chords.top.slice(0, 6)
+              delegate: PairRow {
+                required property var modelData
+                width: body.width
+                name: Model.chordName(modelData.chord)
+                value: modelData.count
+              }
+            }
+
+            // Timing, for home-row mods
+            SectionLabel { text: "TIMING (HOME-ROW MODS)"; visible: root.report.timing.samples > 0 }
+            Column {
+              visible: root.report.timing.samples > 0
+              width: parent.width
+              spacing: Style.space(2)
+              StatRow { name: "median tap";   value: root.report.timing.hold_median + " ms" }
+              StatRow { name: "95% of taps under"; value: root.report.timing.hold_p95 + " ms" }
+              StatRow { name: "rolled keypresses"; value: root.report.timing.roll_pct + "%" }
+              StatRow {
+                visible: !!root.report.timing.overlap_median
+                name: "median roll overlap"; value: root.report.timing.overlap_median + " ms"
+              }
+              StatRow {
+                name: "suggested TAPPING_TERM"
+                value: root.report.timing.tapping_term
+                       ? root.report.timing.tapping_term + " ms"
+                       : "needs more typing"
+                strong: !!root.report.timing.tapping_term
               }
             }
 
@@ -338,6 +491,7 @@ Panel {
     property real pct: 0
     property int value: 0
     property bool hideValue: false
+    property string extra: ""
     implicitHeight: Math.max(label.implicitHeight, Style.space(18))
 
     Text {
@@ -372,11 +526,12 @@ Panel {
       id: amount
       anchors.right: parent.right
       anchors.verticalCenter: parent.verticalCenter
-      width: Style.space(78)
+      width: meter.extra !== "" ? Style.space(116) : Style.space(78)
       horizontalAlignment: Text.AlignRight
       textFormat: Text.PlainText
-      text: meter.hideValue ? (meter.pct + "%")
-                            : (Model.grouped(meter.value) + "  " + meter.pct + "%")
+      text: (meter.hideValue ? (meter.pct + "%")
+                             : (Model.grouped(meter.value) + "  " + meter.pct + "%"))
+            + (meter.extra !== "" ? "  (" + meter.extra + ")" : "")
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
@@ -409,6 +564,37 @@ Panel {
       color: root.dim
       font.family: root.fontFamily
       font.pixelSize: Style.font.caption
+    }
+  }
+
+  // A name on the left and a value on the right.
+  component StatRow: Item {
+    id: stat
+    property string name: ""
+    property string value: ""
+    property bool strong: false
+    width: parent ? parent.width : 0
+    implicitHeight: visible ? Math.max(statName.implicitHeight, Style.space(18)) : 0
+
+    Text {
+      id: statName
+      anchors.left: parent.left
+      anchors.verticalCenter: parent.verticalCenter
+      textFormat: Text.PlainText
+      text: stat.name
+      color: root.foreground
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+    }
+    Text {
+      anchors.right: parent.right
+      anchors.verticalCenter: parent.verticalCenter
+      textFormat: Text.PlainText
+      text: stat.value
+      color: stat.strong ? root.accent : root.dim
+      font.family: root.fontFamily
+      font.pixelSize: Style.font.caption
+      font.bold: stat.strong
     }
   }
 

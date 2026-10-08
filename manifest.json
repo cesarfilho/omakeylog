@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "io.github.cesarfilho.omakeylog",
   "name": "Omakeylog",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "cesarfilho",
   "license": "MIT",
-  "description": "Measures how often you press each key and each adjacent key-pair, to help you design a better QMK keymap (home-row placement, thumb/layer keys, less finger travel). It records aggregate counts only - never the text you type - and shows ranked keys, hand and finger load, same-finger bigrams and QMK suggestions in a panel. A bundled evdev engine does the counting; the bar widget starts and stops it.",
+  "description": "Measures how often you press each key, key-pair and short key sequence, to help you design a better QMK keymap (home-row placement, thumb/layer keys, less finger travel, home-row-mod timing). It records aggregate counts only - never the text you type - and shows a keyboard heatmap, hand and finger load, same-finger pairs, trigram patterns, shortcuts, a suggested TAPPING_TERM and QMK suggestions in a panel. It can map fingers from your own Vial keymap. A bundled evdev engine does the counting; the bar widget starts and stops it.",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Omakeylog",
-    "description": "Key-frequency analyzer for QMK layout tuning: records per-key and bigram counts (no text), shows ranked keys, hand/finger load, same-finger bigrams and layout suggestions.",
+    "description": "Key-frequency analyzer for QMK layout tuning: records per-key, pair and sequence counts (no text) and shows a heatmap, finger load, same-finger pairs, typing timing and layout suggestions.",
     "category": "Compositor",
     "allowMultiple": false,
     "defaultSection": "right",
@@ -23,7 +23,10 @@
       "labelMode": "Total",
       "topKeys": 12,
       "topBigrams": 10,
-      "refreshIntervalSec": 3
+      "refreshIntervalSec": 3,
+      "showHeatmap": true,
+      "compareWithPrevious": true,
+      "resumeRecording": true
     },
     "schema": [
       {
@@ -69,6 +72,26 @@
         "max": 30,
         "step": 1,
         "defaultValue": 3
+      },
+      {
+        "key": "showHeatmap",
+        "type": "boolean",
+        "label": "Show the keyboard heatmap in the panel",
+        "defaultValue": true
+      },
+      {
+        "key": "compareWithPrevious",
+        "type": "boolean",
+        "label": "Compare with the recording before the last reset",
+        "defaultValue": true,
+        "description": "After you change your keymap, press Reset and record again: the panel then shows how finger load and same-finger pairs changed."
+      },
+      {
+        "key": "resumeRecording",
+        "type": "boolean",
+        "label": "Resume recording after a reboot or logout",
+        "defaultValue": true,
+        "description": "Only when recording was on when the session ended. Pressing Stop turns it off until you start it again."
       }
     ]
   },

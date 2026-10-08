@@ -1,0 +1,386 @@
+"""Unit tests for engine/omakeylog. They exercise the counting, the analysis
+and the layout import without a keyboard or python-evdev:
+
+    python3 -m unittest discover -s tests
+"""
+
+import importlib.machinery
+import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+ENGINE = os.path.join(ROOT, "engine", "omakeylog")
+
+
+def load_engine():
+    loader = importlib.machinery.SourceFileLoader("omakeylog_engine", ENGINE)
+    spec = importlib.util.spec_from_loader(loader.name, loader)
+    mod = importlib.util.module_from_spec(spec)
+    sys.dont_write_bytecode = True
+    loader.exec_module(mod)
+    return mod
+
+
+E = load_engine()
+
+
+def typed(tally, text, start=0.0, step=0.1, hold=0.08):
+    """Type text one key at a time, each released before the next."""
+    t = start
+    for ch in text:
+        label = "SPACE" if ch == " " else ch.upper()
+        tally.press(label, t)
+        tally.release(label, t + hold)
+        t += step
+    return t
+
+
+class TallyTest(unittest.TestCase):
+    def test_counts_keys_and_sequences(self):
+        t = E.Tally()
+        typed(t, "the")
+        self.assertEqual(t.keys, {"T": 1, "H": 1, "E": 1})
+        self.assertEqual(t.bigrams, {"T>H": 1, "H>E": 1})
+        self.assertEqual(t.skipgrams, {"T>E": 1})
+        self.assertEqual(t.trigrams, {"T>H>E": 1})
+
+    def test_pause_breaks_the_sequence(self):
+        t = E.Tally()
+        end = typed(t, "ab")
+        typed(t, "c", start=end + E.SEQUENCE_GAP + 1)
+        self.assertEqual(t.bigrams, {"A>B": 1})
+        self.assertEqual(t.trigrams, {})
+
+    def test_shortcut_is_a_chord_not_a_pair(self):
+        t = E.Tally()
+        typed(t, "a")
+        t.press("LEFTCTRL", 0.2)
+        t.press("C", 0.25)
+        t.release("C", 0.3)
+        t.release("LEFTCTRL", 0.35)
+        self.assertEqual(t.chords, {"LEFTCTRL+C": 1})
+        self.assertNotIn("A>C", t.bigrams)
+        self.assertNotIn("LEFTCTRL>C", t.bigrams)
+        self.assertEqual(t.keys["LEFTCTRL"], 1)
+
+    def test_shift_stays_in_the_sequence(self):
+        t = E.Tally()
+        t.press("LEFTSHIFT", 0.0)
+        t.press("T", 0.05)
+        t.release("T", 0.1)
+        t.release("LEFTSHIFT", 0.12)
+        typed(t, "he", start=0.2)
+        self.assertEqual(t.bigrams, {"T>H": 1, "H>E": 1})
+        self.assertEqual(t.chords, {})
+        self.assertEqual(t.shifted, 1)
+
+    def test_hold_histogram_and_rolls(self):
+        t = E.Tally()
+        t.press("A", 0.0)
+        t.press("S", 0.05)    # S goes down while A is still held: a roll
+        t.release("A", 0.09)  # overlap 40 ms
+        t.release("S", 0.15)
+        self.assertEqual(t.rolls, 1)
+        self.assertEqual(t.overlaps, {"40": 1})
+        self.assertEqual(sum(t.holds.values()), 2)
+        self.assertEqual(t.key_holds["A"], [90, 1])
+
+    def test_repeat_presses_and_unknown_release(self):
+        t = E.Tally()
+        t.release("A", 1.0)  # released without a press: ignored
+        self.assertEqual(t.holds, {})
+
+    def test_round_trip(self):
+        t = E.Tally()
+        typed(t, "hello world")
+        again = E.Tally(json.loads(json.dumps(t.to_dict())))
+        self.assertEqual(again.keys, t.keys)
+        self.assertEqual(again.trigrams, t.trigrams)
+        self.assertEqual(again.key_holds, t.key_holds)
+
+    def test_old_stats_load(self):
+        t = E.Tally({"version": 1, "keys": {"A": 3}, "bigrams": {"A>A": 2}})
+        self.assertEqual(t.keys, {"A": 3})
+        self.assertEqual(t.chords, {})
+
+
+class ReportTest(unittest.TestCase):
+    def stats(self, text="the quick brown fox jumps over the lazy dog " * 20):
+        t = E.Tally()
+        typed(t, text)
+        return t.to_dict()
+
+    def test_empty(self):
+        rep = E.build_report(stats={}, layout=E.default_layout())
+        self.assertEqual(rep["total"], 0)
+        self.assertEqual(rep["suggestions"][0][:10], "No data ye")
+
+    def test_shape(self):
+        rep = E.build_report(stats=self.stats(), layout=E.default_layout())
+        self.assertGreater(rep["total"], 0)
+        self.assertAlmostEqual(sum(f["pct"] for f in rep["fingers"]),
+                               100 - rep["hands"]["other"], delta=0.5)
+        self.assertEqual(rep["top_keys"][0]["label"], "SPACE")
+        kinds = rep["trigrams"]["kinds"]
+        self.assertAlmostEqual(sum(kinds.values()), 100, delta=0.5)
+        self.assertEqual(len(rep["heatmap"]), 5)
+        self.assertIsNone(rep["compare"])
+        json.dumps(rep)  # serializable
+
+    def test_sfb_detected(self):
+        # E then D: both left middle on QWERTY
+        rep = E.build_report(stats=self.stats("ed ed ed "), layout=E.default_layout())
+        pairs = [r["pair"] for r in rep["sfb"]["top"]]
+        self.assertIn("E D", pairs)
+
+    def test_compare(self):
+        before = self.stats("ed ed ed ed ")
+        after = self.stats("the cat sat ")
+        rep = E.build_report(stats=after, layout=E.default_layout(),
+                             baseline=before, baseline_name="old")
+        self.assertEqual(rep["compare"]["against"], "old")
+        self.assertLess(rep["compare"]["sfb_delta"], 0)
+        self.assertIsNotNone(rep["fingers"][0]["delta"])
+
+    def test_tapping_term(self):
+        t = E.Tally()
+        typed(t, "asdf jkl; " * 40, hold=0.12)
+        rep = E.build_report(stats=t.to_dict(), layout=E.default_layout())
+        tt = rep["timing"]["tapping_term"]
+        self.assertIsNotNone(tt)
+        self.assertTrue(150 <= tt <= 300)
+        self.assertGreater(tt, rep["timing"]["hold_p95"])
+
+    def test_trigram_kinds(self):
+        L = E.default_layout()
+        f = lambda keys: E._trigram_kind([L.finger(k)[:2] for k in keys])
+        self.assertEqual(f(["A", "J", "S"]), "alternate")
+        self.assertEqual(f(["A", "S", "J"]), "roll")
+        self.assertEqual(f(["A", "S", "D"]), "onehand")
+        self.assertEqual(f(["A", "D", "S"]), "redirect")
+        self.assertEqual(f(["E", "D", "J"]), "sfb")
+
+
+class LayoutTest(unittest.TestCase):
+    def test_qmk_labels(self):
+        self.assertEqual(E.qmk_label("KC_A"), ("A", None))
+        self.assertEqual(E.qmk_label("LSFT_T(KC_A)"), ("A", "LEFTSHIFT"))
+        self.assertEqual(E.qmk_label("MT(MOD_RCTL, KC_SCLN)"), ("SEMICOLON", "RIGHTCTRL"))
+        self.assertEqual(E.qmk_label("LT(1, KC_SPC)"), ("SPACE", None))
+        self.assertEqual(E.qmk_label("MO(1)"), (None, None))
+        self.assertEqual(E.qmk_label(-1), (None, None))
+        self.assertEqual(E.qmk_label("KC_F12"), ("F12", None))
+
+    def corne(self):
+        left = [
+            ["KC_TAB", "KC_Q", "KC_W", "KC_E", "KC_R", "KC_T"],
+            ["KC_LCTL", "LGUI_T(KC_A)", "KC_S", "KC_D", "KC_F", "KC_G"],
+            ["KC_LSFT", "KC_Z", "KC_X", "KC_C", "KC_V", "KC_B"],
+            [-1, -1, -1, "KC_LGUI", "MO(1)", "KC_SPC"],
+        ]
+        right = [
+            ["KC_BSPC", "KC_P", "KC_O", "KC_I", "KC_U", "KC_Y"],
+            ["KC_QUOT", "KC_SCLN", "KC_L", "KC_K", "KC_J", "KC_H"],
+            ["KC_ESC", "KC_SLSH", "KC_DOT", "KC_COMM", "KC_M", "KC_N"],
+            [-1, -1, -1, "KC_RALT", "MO(2)", "KC_ENT"],
+        ]
+        return {"layout": [left + right]}
+
+    def test_vil_import(self):
+        data = E.layout_from_vil(self.corne())
+        keys = data["keys"]
+        self.assertEqual(keys["A"], ["L", "pinky", 1])
+        self.assertEqual(keys["F"], ["L", "index", 1])
+        self.assertEqual(keys["G"], ["L", "index", 1])
+        self.assertEqual(keys["D"], ["L", "middle", 1])
+        self.assertEqual(keys["J"], ["R", "index", 1])
+        self.assertEqual(keys["SEMICOLON"], ["R", "pinky", 1])
+        self.assertEqual(keys["Q"], ["L", "pinky", 2])
+        self.assertEqual(keys["Z"], ["L", "pinky", 0])
+        self.assertEqual(keys["SPACE"], ["L", "thumb", -1])
+        self.assertEqual(keys["ENTER"], ["R", "thumb", -1])
+        self.assertEqual(keys["LEFTMETA"][1], "thumb")  # the plain key wins over the mod-tap
+        self.assertEqual(len(data["grid"]), 4)
+        # the grid reads left to right: right half's outer column comes last
+        self.assertEqual(data["grid"][1][-1][0], "APOSTROPHE")
+
+    def test_vil_right_inner_first(self):
+        vil = self.corne()
+        right = vil["layout"][0][4:]
+        vil["layout"][0][4:] = [list(reversed(r)) for r in right]
+        data = E.layout_from_vil(vil, right_inner_first=True)
+        self.assertEqual(data["keys"]["J"], ["R", "index", 1])
+        self.assertEqual(data["keys"]["SEMICOLON"], ["R", "pinky", 1])
+
+    def test_load_layout_file(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "layout.json")
+            with open(path, "w") as fh:
+                json.dump(E.layout_from_vil(self.corne()), fh)
+            layout = E.load_layout(path)
+            self.assertEqual(layout.source, path)
+            self.assertEqual(layout.finger("SPACE"), ("L", "thumb", -1))
+            self.assertIn("A", layout.home())
+            rep = E.build_report(stats={"keys": {"SPACE": 5, "A": 3}}, layout=layout)
+            self.assertEqual(rep["hands"]["thumb"], 62.5)
+            names = [f["finger"] for f in rep["fingers"]]
+            self.assertIn("L-thumb", names)
+            self.assertNotIn("T-thumb", names)
+
+    def test_bad_layout_falls_back(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "layout.json")
+            with open(path, "w") as fh:
+                fh.write("{not json")
+            self.assertEqual(E.load_layout(path).source, "default")
+
+    def test_vil_rejects_garbage(self):
+        with self.assertRaises(ValueError):
+            E.layout_from_vil({"nope": 1})
+
+
+class ProcessTest(unittest.TestCase):
+    def test_pid_alive_rejects_other_processes(self):
+        self.assertFalse(E.pid_alive(0))
+        self.assertFalse(E.pid_alive(os.getpid()))  # alive, but not omakeylog
+        self.assertFalse(E.pid_alive(2 ** 22 + 1))
+
+    def test_cli_in_a_scratch_home(self):
+        with tempfile.TemporaryDirectory() as d:
+            env = dict(os.environ, XDG_DATA_HOME=d, XDG_CONFIG_HOME=d)
+
+            def run(*args):
+                return subprocess.run([sys.executable, ENGINE] + list(args), env=env,
+                                      capture_output=True, text=True)
+
+            status = json.loads(run("status").stdout)
+            self.assertFalse(status["recording"])
+            self.assertFalse(status["wanted"])
+            self.assertEqual(run("report", "--json").returncode, 0)
+            self.assertEqual(run("resume").returncode, 0)  # not wanted: no-op
+            self.assertEqual(run("layout", "reset").returncode, 0)
+            self.assertEqual(run("nope").returncode, 2)
+
+
+class FakeDevice:
+    """Stands in for evdev.InputDevice: readable through a pipe, and raises
+    OSError on read once 'unplugged', like a removed keyboard does."""
+
+    def __init__(self, path, events=()):
+        self.path = path
+        self.name = "fake " + path
+        self.r, self.w = os.pipe()
+        self.events = list(events)
+        self.unplugged = False
+        self.reads = 0
+        os.write(self.w, b"x")
+
+    def fileno(self):
+        return self.r
+
+    def read(self):
+        self.reads += 1
+        if self.unplugged:
+            raise OSError(19, "No such device")
+        os.read(self.r, 1)
+        events, self.events = self.events, []
+        return events
+
+    def close(self):
+        for fd in (self.r, self.w):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+class FakeEvent:
+    def __init__(self, code, value, t):
+        self.type, self.code, self.value, self.t = 1, code, value, t
+
+    def timestamp(self):
+        return self.t
+
+
+@unittest.skipUnless(importlib.util.find_spec("evdev"), "python-evdev not installed")
+class RecordLoopTest(unittest.TestCase):
+    def setUp(self):
+        import evdev
+        self.ecodes = evdev.ecodes
+        self.dir = tempfile.TemporaryDirectory()
+        self.saved = {}
+        for name in ("DATA_DIR", "STATS", "STATUS", "STATE", "PIDFILE", "REPORT"):
+            self.saved[name] = getattr(E, name)
+            setattr(E, name, os.path.join(self.dir.name, os.path.basename(getattr(E, name))))
+        self.saved["RESCAN_SECONDS"] = E.RESCAN_SECONDS
+
+    def tearDown(self):
+        for name, value in self.saved.items():
+            setattr(E, name, value)
+        self.dir.cleanup()
+
+    def run_loop(self, devices, seconds, during=None, **kw):
+        import signal
+        import threading
+
+        def stopper():
+            if during:
+                during()
+            import time
+            time.sleep(seconds)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        old = signal.getsignal(signal.SIGTERM)
+        threading.Thread(target=stopper, daemon=True).start()
+        try:
+            E._run_loop(devices, **kw)
+        finally:
+            signal.signal(signal.SIGTERM, old)
+        with open(E.STATS) as fh:
+            return json.load(fh)
+
+    def test_unplugged_keyboard_does_not_spin(self):
+        k = self.ecodes
+        dev = FakeDevice("/dev/input/event90",
+                         [FakeEvent(k.KEY_A, 1, 0.0), FakeEvent(k.KEY_A, 0, 0.05)])
+        other = FakeDevice("/dev/input/event91")
+
+        def unplug():
+            import time
+            time.sleep(0.3)
+            dev.unplugged = True
+            os.write(dev.w, b"x")  # wake the selector with the dead device
+
+        stats = self.run_loop([dev, other], 1.5, during=unplug, hotplug=False)
+        self.assertEqual(stats["keys"], {"A": 1})
+        self.assertLessEqual(dev.reads, 3)  # dropped after the first error
+        other.close()
+
+    def test_hotplugged_keyboard_is_picked_up(self):
+        k = self.ecodes
+        first = FakeDevice("/dev/input/event90")
+        late = FakeDevice("/dev/input/event92",
+                          [FakeEvent(k.KEY_B, 1, 0.0), FakeEvent(k.KEY_B, 0, 0.05)])
+        E.RESCAN_SECONDS = 0.2
+        real_glob, real_open = E.glob.glob, E.open_keyboards
+        E.glob.glob = lambda pattern: ["/dev/input/event90", "/dev/input/event92"]
+        E.open_keyboards = lambda paths, explicit, skip=(): (
+            [late] if "/dev/input/event92" in paths else [], False, [])
+        try:
+            stats = self.run_loop([first], 1.2, hotplug=True)
+        finally:
+            E.glob.glob, E.open_keyboards = real_glob, real_open
+        self.assertEqual(stats["keys"], {"B": 1})
+        with open(E.STATUS) as fh:
+            self.assertEqual(len(json.load(fh)["devices"]), 2)
+        first.close()
+        late.close()
+
+
+if __name__ == "__main__":
+    unittest.main()
