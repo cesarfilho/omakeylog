@@ -8,6 +8,8 @@ which awkward same-finger moves your current layout forces on you, and what
 
 It records **aggregate counts only**, never the text you type.
 
+Listed on the [Omarchy plugin marketplace](https://omarchyplugins.com/plugin.html?id=io.github.cesarfilho.omakeylog).
+
 <p align="center">
   <img src="preview.png" alt="The Omakeylog panel: comparison with the previous recording, keyboard heatmap and most-pressed keys" width="419">
 </p>
@@ -136,6 +138,8 @@ Until both steps are done, the panel shows what is missing and how to fix it,
 and recording stays off.
 
 ## Install
+
+Install it from its [marketplace page](https://omarchyplugins.com/plugin.html?id=io.github.cesarfilho.omakeylog), or:
 
 ```bash
 omarchy plugin add https://github.com/cesarfilho/omakeylog.git --enable
@@ -413,7 +417,10 @@ python3 -B -m unittest discover -s tests -v
 ```
 
 GitHub Actions runs both on every push and pull request. Bumping `version` in
-`manifest.json` on `main` tags and publishes a release.
+`manifest.json` on `main` tags and publishes a release, then opens a
+verification request on the plugin marketplace for that exact commit. A
+marketplace maintainer approves each update before it replaces the listed
+snapshot.
 
 ## Update
 
