@@ -11,7 +11,7 @@ It records **aggregate counts only**, never the text you type.
 Listed on the [Omarchy plugin marketplace](https://omarchyplugins.com/plugin.html?id=io.github.cesarfilho.omakeylog).
 
 <p align="center">
-  <img src="preview.png" alt="The Omakeylog panel: comparison with the previous recording, keyboard heatmap and most-pressed keys" width="419">
+  <img src="preview.png" alt="The Omakeylog panel, Overview tab: headline numbers, words per minute over two weeks, keyboard heatmap and most-pressed keys" width="420">
 </p>
 
 ## Contents
@@ -22,7 +22,7 @@ Listed on the [Omarchy plugin marketplace](https://omarchyplugins.com/plugin.htm
 - [Install](#install)
 - [Use](#use)
 - [Settings](#settings)
-- [Reading the analysis](#reading-the-analysis)
+- [The panel, tab by tab](#the-panel-tab-by-tab)
 - [Your own keyboard layout (Vial)](#your-own-keyboard-layout-vial)
 - [From the numbers to a QMK keymap](#from-the-numbers-to-a-qmk-keymap)
 - [Engine CLI](#engine-cli)
@@ -36,6 +36,8 @@ Listed on the [Omarchy plugin marketplace](https://omarchyplugins.com/plugin.htm
 
 ## Features
 
+- **A five-tab panel** (Overview, Layout, Timing, History, Tips), each tab on
+  one screen; see [The panel, tab by tab](#the-panel-tab-by-tab).
 - **Keyboard heatmap**: every key shaded by how often you press it; hover a key
   for its count.
 - **Per-key counts** for every key on every keyboard attached, including
@@ -171,11 +173,11 @@ The widget goes to the right side of the bar. Move it with
 | **Refresh** | Recompute the analysis now |
 | **Reset**, then **Confirm reset** | Back up the current counts and start from zero (the typing history is kept) |
 
-Keyboard shortcuts while the panel is open: `1`–`4` switch tabs, `S`
+Keyboard shortcuts while the panel is open: `1`–`5` switch tabs, `S`
 start/stop, `R` refresh, `X` reset, `Esc` close.
 
-The icon is dimmed when nothing has been recorded yet and highlighted while
-recording. Hover it for the current total.
+What every part of the panel shows is in
+[The panel, tab by tab](#the-panel-tab-by-tab).
 
 Counts accumulate across sessions and reboots. Short samples are skewed by
 whatever you happened to be doing (an afternoon of Vim leans heavily on
@@ -196,7 +198,7 @@ Change these from the Omarchy settings panel, or in the widget's entry in
 | `showLabel` | `false` | Show a number next to the bar icon |
 | `labelMode` | `Total` | `Total`: keypresses on record. `Top key`: your most-pressed key |
 | `topKeys` | `12` | Keys listed in the panel (5–40; the Overview tab shows at most 8) |
-| `topBigrams` | `10` | Key-pairs listed in the panel (5–30; the Layout tab shows at most 8) |
+| `topBigrams` | `10` | Key-pairs listed in the panel (5–30; the Layout tab shows at most 7) |
 | `refreshIntervalSec` | `3` | How often the open panel refreshes (1–30 s) |
 | `showHeatmap` | `true` | Show the keyboard heatmap |
 | `historyRange` | `30 days` | Period the History tab opens on: `Session`, `24 hours`, `30 days`, `12 months` or `Years` |
@@ -206,73 +208,174 @@ Change these from the Omarchy settings panel, or in the widget's entry in
 When the panel is closed, the widget checks the engine every 8 seconds so the
 icon reflects whether recording is on.
 
-## Reading the analysis
+## The panel, tab by tab
 
-The panel has four tabs, each sized to fit on one screen:
+Click the keyboard icon in the bar to open the panel. The icon is dimmed until
+something has been recorded and highlighted while recording; hover it for the
+total.
 
-- **Overview**: four headline numbers (today's keypresses, same-finger rate,
-  today's words per minute and your tapping term or median tap), words per
-  minute over the last 14 days (click it for the History tab), the heatmap,
-  the 8 most-pressed keys and hand balance.
-- **Layout**: finger load as a column chart, trigram patterns as one stacked
-  bar, top key-pairs next to the same-finger pairs, and top shortcuts.
-- **Timing**: hold-time numbers, a histogram of how long you hold a key with
-  the suggested TAPPING_TERM marked, per-key home-row holds and the QMK
-  suggestions.
-- **History**: pick a period (the recording session, 24 hours, 30 days, 12
-  months or years) to see keypresses and words per minute for each hour, day,
-  month or year, with totals, typing time, average and best speed. Hover a bar
-  for its numbers.
+The top of the panel is the same on every tab:
 
-What each section means:
+- **Title and status line**: how many keypresses are on record, or whether
+  recording is on, **Paused** (screen locked or another user's session in
+  front) or off.
+- **Start recording / Stop**: turns the background counter on or off. It keeps
+  running when the panel is closed and survives shell reloads.
+- **Refresh**: recomputes the analysis now instead of at the next poll.
+- **Reset**, then **Confirm reset**: moves the current counts to a backup and
+  starts from zero. Use it when you flash a new keymap, so the next recording
+  is compared with the old one. The typing history is kept.
+- **Tabs**: Overview, Layout, Timing, History and Tips. Keys `1` to `5` switch
+  between them.
 
+Each tab is sized to fit on one screen. The screenshots below use sample data.
+
+### Overview
+
+<p align="center">
+  <img src="docs/screenshots/overview.png" alt="Overview tab: headline numbers, words-per-minute strip, comparison, keyboard heatmap, most-pressed keys and hand balance" width="420">
+</p>
+
+The whole picture at a glance.
+
+- **Headline numbers**
+  - *keys today*: keypresses since midnight. Until there is any history (data
+    recorded before 1.2 has no dates) it shows the total on record instead.
+  - *same-finger*: the share of key-pairs typed with one finger twice (see
+    [Layout](#layout)). It turns red above 3%, a common target for a good
+    layout.
+  - *wpm today*: today's typing speed (see [History](#history) for how it is
+    measured).
+  - *tapping term* (or *median tap* until there are enough samples): the
+    `TAPPING_TERM` suggested for home-row mods (see [Timing](#timing)).
+- **Words-per-minute strip**: one bar per day for the last 14 days. It shows
+  whether you are getting faster or slower, for example after switching
+  layouts. Click it to open the History tab.
 - **Comparison** (only after a reset): the previous recording's same-finger
-  bigram rate next to the current one. Finger load rows also show the change in
-  percentage points.
-- **Heatmap**: your keyboard, each key shaded by its share of presses. Hover a
-  key for the exact count. The line under it names the layout used for
-  fingering.
-- **Most-pressed keys**: your keys ranked by count and share. The top of this
-  list is your prime real estate and belongs on the strongest, easiest
-  positions: home row, index and middle fingers, thumb keys.
-- **Hand balance**: left vs right vs thumbs. Around 50/50 between the hands is
-  comfortable; a big skew means one hand is doing the work.
-- **Finger load**: share per finger. Pinkies and ring fingers are weak, so a
-  pinky above roughly 10% is a classic target for a fix (Backspace, Enter and
-  Shift usually cause it).
-- **Top key-pairs**: the most common back-to-back pairs in typing.
-- **Same-finger bigrams**: pairs typed by one finger twice, such as `E → D` or
-  `R → T` on QWERTY. They are slow and tiring, and the main thing an optimized
-  layout reduces. Repeats of the same key (`L → L`) are not counted.
-- **Same-finger skipgrams**: the same, with one key in between (`E → x → D`).
-  Less costly than SFBs, but layout analyzers weigh them too.
-- **Trigram patterns**, for every three-key run:
-  - *alternate*: hands go left, right, left (or the reverse), which is easy;
-  - *roll*: two keys on one hand on different fingers, then the other hand;
+  rate next to the current one. This is how you see whether a keymap change
+  helped.
+- **Heatmap**: your keyboard, each key shaded by its share of presses, with the
+  strongest colour on the keys you press most. Hover a key for its exact count.
+  It shows at a glance which keys deserve the best positions and which ones sit
+  on a weak finger or a long reach. The line underneath names the layout used
+  for fingering (QWERTY by default, or your [Vial keymap](#your-own-keyboard-layout-vial)).
+- **Most-pressed keys**: your top 8 keys and their share of all presses. These
+  are your prime real estate: they belong on the home row, the index and middle
+  fingers or the thumbs.
+- **Hand balance**: left hand, right hand, thumbs and other keys (arrows,
+  F-keys). Close to 50/50 between the hands is comfortable; a big skew means
+  one hand does most of the work.
+
+### Layout
+
+<p align="center">
+  <img src="docs/screenshots/layout.png" alt="Layout tab: finger load columns, trigram patterns, top key-pairs beside same-finger pairs, and top shortcuts" width="420">
+</p>
+
+How your keymap spreads the work, the numbers layout analyzers optimize.
+
+- **Finger load**: the share of keypresses per finger, left pinky to right
+  pinky with the thumbs in the middle. Pinkies and ring fingers are the
+  weakest, so a pinky above roughly 10% is a classic target (Backspace, Enter
+  and Shift usually cause it). After a reset, the small number under each
+  column is the change since the previous recording, in percentage points.
+- **Trigram patterns**: every run of three keys, sorted into five kinds:
+  - *roll*: two keys on one hand on different fingers, then the other hand.
+    Comfortable and fast;
+  - *alternate*: hands go left, right, left (or the reverse). Easy;
   - *one-hand*: three keys on one hand moving steadily inward or outward;
-  - *redirect*: three keys on one hand that change direction, which is
-    awkward;
-  - *same-finger*: the run contains a same-finger pair.
+  - *redirect*: three keys on one hand that change direction. Awkward;
+  - *same-finger*: the run contains a same-finger pair. Slow.
+
+  More roll and alternate and less redirect and same-finger means a smoother
+  layout.
+- **Top key-pairs**: the pairs you type back-to-back most often. Frequent pairs
+  should be easy to type in sequence: different fingers, ideally a roll.
+- **Same-finger** (with the rate in the header): the most frequent pairs typed
+  by one finger twice, such as `E → D` or `R → T` on QWERTY. They are slow and
+  tiring, and reducing them is the main thing an optimized layout does.
+  Repeats of the same key (`L → L`) don't count.
+- **Same finger, one key between**: the same with a key in between
+  (`E → x → D`, a skipgram) and the worst three. Less costly than a direct
+  same-finger pair, but analyzers weigh them too.
 - **Top shortcuts**: key combinations with Ctrl, Alt or Super held. They are
-  counted apart from typing, so `Ctrl+C` does not show up as a `CTRL → C` pair.
-  Shift is part of typing: a capital letter still counts in the pairs.
-- **Timing (home-row mods)**:
-  - *median tap* and *95% of taps under*: how long you hold an ordinary
-    keypress;
-  - *rolled keypresses*: how often you press the next key before releasing the
-    previous one;
-  - *median roll overlap*: how long the two keys are down together when you
-    roll;
-  - *suggested TAPPING_TERM*: above nearly all your taps, with a 30 ms margin,
-    kept between 150 and 300 ms. It appears after a few hundred keypresses.
-- **QMK suggestions**: short, plain-language takeaways from all of the above.
-- **Words per minute**: characters typed (letters, digits, punctuation and
-  Space; not Backspace, arrows, modifiers or shortcuts) divided by 5, per
-  minute of *active* typing. Active time adds up the gaps between keypresses
-  shorter than 1.5 s, so reading, thinking and breaks don't drag the number
-  down. A period with less than 20 s of typing shows no speed. Because
-  corrections are not subtracted, it reads a little higher than a typing
-  test's net WPM.
+  counted apart from typing, so `Ctrl+C` is not a `CTRL → C` pair. A shortcut
+  near the top is a candidate for a combo or a shortcut layer. Shift is part of
+  typing: a capital letter still counts in the pairs.
+
+### Timing
+
+<p align="center">
+  <img src="docs/screenshots/timing.png" alt="Timing tab: tap statistics, hold-time histogram with the suggested TAPPING_TERM, and home-row hold times" width="420">
+</p>
+
+How you press keys, for tuning [home-row mods](https://docs.qmk.fm/mod_tap).
+
+- **median tap** and **95% under**: how long you hold an ordinary keypress.
+  Half your taps are shorter than the first; 95% are shorter than the second.
+- **rolled**: how often you press the next key before releasing the previous
+  one. With home-row mods, rolls are what trigger accidental modifiers.
+- **tapping term**: the suggested QMK `TAPPING_TERM`, just above nearly all of
+  your taps (the 95% mark plus 30 ms, kept between 150 and 300 ms). A key held
+  longer than this becomes a modifier. It appears after 300 timed keypresses.
+- **How long you hold a key**: a histogram of your hold times in 10 ms steps,
+  with the suggested `TAPPING_TERM` as a line. Bars right of the line are taps
+  that would turn into holds.
+- **Roll overlap**: how long both keys are down together when you roll.
+- **Home-row holds**: the average hold time of each home-row key, slowest
+  first. A key you hold noticeably longer than the others may need its own
+  tapping term, or is a poor place for a modifier.
+
+### History
+
+<p align="center">
+  <img src="docs/screenshots/history-days.png" alt="History tab, 30 days: keypresses, typing time, average and best words per minute, with one bar per day" width="420">
+</p>
+
+How much and how fast you type over time.
+
+- **Period**: *Session* (since you pressed Start, by hour), *24 h* (by hour),
+  *30 days* (by day), *12 months* (by month) or *Years*. The one it opens on is
+  the `historyRange` setting.
+- **keys**, **typing**, **avg wpm**, **best wpm**: totals for the period:
+  keypresses, active typing time, average speed and the best hour, day or month.
+- **Words per minute** and **Keypresses**: one bar per hour, day, month or
+  year. Hover a bar for its numbers. Use it to follow your speed while learning
+  a new layout, or to see when and how much you type.
+
+How speed is measured: characters typed (letters, digits, punctuation and
+Space; not Backspace, arrows, modifiers or shortcuts) divided by 5, per minute
+of *active* typing. Active time adds up the gaps between keypresses shorter
+than 1.5 s, so reading, thinking and breaks don't drag the number down. A
+period with less than 20 s of typing shows no speed. Corrections are not
+subtracted, so it reads a little higher than a typing test's net WPM.
+
+The history starts with version 1.2; counts recorded earlier have no dates.
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/history-hours.png" alt="History, last 24 hours by hour" width="280"></td>
+    <td><img src="docs/screenshots/history-months.png" alt="History, last 12 months by month" width="280"></td>
+    <td><img src="docs/screenshots/history-years.png" alt="History, every year" width="280"></td>
+  </tr>
+  <tr>
+    <td align="center">24 h</td>
+    <td align="center">12 months</td>
+    <td align="center">Years</td>
+  </tr>
+</table>
+
+### Tips
+
+<p align="center">
+  <img src="docs/screenshots/tips.png" alt="Tips tab: QMK suggestions in plain language" width="420">
+</p>
+
+Short, plain-language takeaways from all of the above: keys worth moving to
+the home row or a thumb, your prime real estate, the same-finger rate, the
+tapping term, rolls with home-row mods, and the change since the previous
+recording. [From the numbers to a QMK keymap](#from-the-numbers-to-a-qmk-keymap)
+goes into more detail.
 
 Without a custom layout, fingering assumes standard QWERTY touch typing on a
 row-staggered keyboard with Space on the thumbs. Keys outside the main block
