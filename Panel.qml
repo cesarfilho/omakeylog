@@ -60,6 +60,9 @@ Panel {
     : Model.historyRange(hostWidget ? String(hostWidget.setting("historyRange", "30 days")) : "30 days")
   readonly property var series: report.history[range] || []
   readonly property var rangeSummary: report.history.summary[range] || ({})
+  // Counts recorded before 1.2 have no dates, so the history can be empty
+  // while the counts are not.
+  readonly property bool hasHistory: ((report.history.summary.years || {}).keys || 0) > 0
 
   readonly property string heroMeta: {
     if (errorMsg !== "") return "Not recording"
@@ -252,7 +255,11 @@ Panel {
 
               Row {
                 width: parent.width
-                Kpi { width: parent.width / 4; value: Model.grouped(root.report.history.today.keys); caption: "keys today" }
+                Kpi {
+                  width: parent.width / 4
+                  value: Model.grouped(root.hasHistory ? root.report.history.today.keys : root.total)
+                  caption: root.hasHistory ? "keys today" : "keys"
+                }
                 Kpi { width: parent.width / 4; value: root.report.sfb.pct + "%"; caption: "same-finger"; warn: root.report.sfb.pct >= 3 }
                 Kpi {
                   width: parent.width / 4
@@ -777,7 +784,10 @@ Panel {
                 width: parent.width
                 textFormat: Text.PlainText
                 wrapMode: Text.Wrap
-                text: root.range === "session" && !root.recording
+                text: !root.hasHistory
+                      ? "History starts with version 1.2 - "
+                        + (root.recording ? "it fills in as you type." : "press Start to begin recording it.")
+                      : root.range === "session" && !root.recording
                       ? "Not recording - the session starts when you press Start."
                       : "No typing recorded in this period yet."
                 color: root.dim
