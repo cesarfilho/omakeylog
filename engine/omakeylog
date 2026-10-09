@@ -18,7 +18,8 @@ Subcommands:
   stop                                         stop the running recorder
   status                                       print JSON status
   report [--json | --csv] [--no-compare]       analyse stats for QMK
-  reset                                        back up and clear the counts
+  reset [--history]                            back up and clear the counts
+                                               (--history: the typing history too)
   layout show                                  print the key -> finger mapping
   layout import-vil FILE [--right-inner-first] build a layout from a Vial file
   layout reset                                 go back to the QWERTY mapping
@@ -49,6 +50,7 @@ STATS = os.path.join(DATA_DIR, "stats.json")
 REPORT = os.path.join(DATA_DIR, "report.json")
 STATUS = os.path.join(DATA_DIR, "status.json")
 STATE = os.path.join(DATA_DIR, "state.json")
+HISTORY = os.path.join(DATA_DIR, "history.json")
 PIDFILE = os.path.join(DATA_DIR, "omakeylog.pid")
 LAYOUT_FILE = os.path.join(CONFIG_DIR, "layout.json")
 
@@ -62,6 +64,16 @@ RESCAN_SECONDS = 3.0
 SESSION_CHECK_SECONDS = 1.0
 # Check sooner when this many keys are waiting for the check to count them.
 PENDING_MAX = 512
+# Keys that type a character, for words per minute (a word is 5 characters).
+# Editing and navigation keys, modifiers and shortcuts are left out.
+CHAR_KEYS = frozenset(
+    [chr(c) for c in range(ord("A"), ord("Z") + 1)]
+    + [str(d) for d in range(10)]
+    + ["SPACE", "COMMA", "DOT", "SLASH", "SEMICOLON", "APOSTROPHE", "MINUS",
+       "EQUAL", "LEFTBRACE", "RIGHTBRACE", "BACKSLASH", "GRAVE"]
+)
+# Hours with less active typing than this show no WPM: too little to measure.
+WPM_MIN_ACTIVE_MS = 20000
 # Hold and overlap histograms: 10 ms buckets, everything >= 1 s in one bucket.
 BUCKET_MS = 10
 BUCKET_CAP_MS = 1000
@@ -246,8 +258,9 @@ class Tally:
                 "holds", "overlaps")
     TOTALS = ("rolls", "seq_presses", "shifted")
 
-    def __init__(self, data=None):
+    def __init__(self, data=None, timeline=None):
         data = data or {}
+        self.timeline = timeline  # a Timeline, fed with every counted press
         for name in self.COUNTERS:
             setattr(self, name, dict(data.get(name, {})))
         for name in self.TOTALS:
@@ -261,10 +274,12 @@ class Tally:
     def press(self, label, t):
         _inc(self.keys, label)
         mods = sorted(m for m in self.down if m in MODIFIERS and m != label)
+        shortcut = [m for m in mods if m not in SHIFTS]
+        if self.timeline is not None:
+            self.timeline.press(t, label in CHAR_KEYS and not shortcut)
         if label in MODIFIERS:
             self.down[label] = t
             return
-        shortcut = [m for m in mods if m not in SHIFTS]
         if shortcut:
             # A shortcut, not typing: count the combination, break the sequence.
             _inc(self.chords, "+".join(mods + [label]))
@@ -312,6 +327,12 @@ class Tally:
         self.down.clear()
         self.roll_from.clear()
         self.history = []
+        if self.timeline is not None:
+            self.timeline.pause()
+
+    def clear(self):
+        """Start the counts from zero (after a reset), keeping the timeline."""
+        self.__init__(None, self.timeline)
 
     def to_dict(self):
         out = {"version": 2, "updated": int(time.time())}
@@ -321,6 +342,134 @@ class Tally:
             out[name] = getattr(self, name)
         out["key_holds"] = self.key_holds
         return out
+
+
+class Timeline:
+    """Keypresses, typed characters and active typing time per local hour.
+
+    It answers "how much and how fast did I type" over sessions, days, months
+    and years. Active time is the gaps between presses shorter than
+    SEQUENCE_GAP, so idle time does not lower the speed. Only these three
+    numbers are kept per hour, never which keys. It lives in its own file, so a
+    reset of the counts does not erase it.
+    """
+
+    def __init__(self, data=None):
+        data = data or {}
+        self.hours = {k: [int(x) for x in v][:3] for k, v in data.get("hours", {}).items()}
+        self.last = None
+
+    def press(self, t, typed):
+        b = self.hours.setdefault(_hour_key(t), [0, 0, 0])
+        b[0] += 1
+        if typed:
+            b[1] += 1
+        if self.last is not None and 0 < t - self.last < SEQUENCE_GAP:
+            b[2] += int(round((t - self.last) * 1000))
+        self.last = t
+
+    def pause(self):
+        self.last = None
+
+    def to_dict(self):
+        return {"version": 1, "hours": self.hours}
+
+
+def _hour_key(t):
+    return time.strftime("%Y-%m-%dT%H", time.localtime(t))
+
+
+def load_history(path=None):
+    return Timeline(_read_json(path or HISTORY, {}))
+
+
+def wpm(chars, active_ms):
+    if active_ms < WPM_MIN_ACTIVE_MS:
+        return None
+    return round(chars / 5.0 / (active_ms / 60000.0), 1)
+
+
+def _series_row(label, key, b):
+    return {"label": label, "key": key, "keys": b[0], "chars": b[1],
+            "active_min": round(b[2] / 60000.0, 1), "wpm": wpm(b[1], b[2])}
+
+
+def _summary(rows):
+    keys = sum(r["keys"] for r in rows)
+    chars = sum(r["chars"] for r in rows)
+    active_ms = sum(int(round(r["active_min"] * 60000)) for r in rows)
+    peaks = [r["wpm"] for r in rows if r["wpm"] is not None]
+    return {"keys": keys, "active_min": round(active_ms / 60000.0, 1),
+            "wpm": wpm(chars, active_ms), "peak_wpm": max(peaks) if peaks else None}
+
+
+def build_history(timeline, now=None, since=None):
+    """The timeline rolled up for the panel: the current recording session by
+    hour, the last 24 hours, 30 days, 12 months, and every year."""
+    now = time.time() if now is None else now
+    hours = timeline.hours
+
+    def total(prefix_keys):
+        b = [0, 0, 0]
+        for k in prefix_keys:
+            for i, v in enumerate(hours.get(k, (0, 0, 0))):
+                b[i] += v
+        return b
+
+    def by_prefix(prefix):
+        b = [0, 0, 0]
+        for k, v in hours.items():
+            if k.startswith(prefix):
+                for i in range(3):
+                    b[i] += v[i]
+        return b
+
+    out = {}
+    last24 = []
+    for i in range(23, -1, -1):
+        t = now - i * 3600
+        k = _hour_key(t)
+        last24.append(_series_row(time.strftime("%H", time.localtime(t)), k, total([k])))
+    out["hours"] = last24
+
+    days = []
+    for i in range(29, -1, -1):
+        lt = time.localtime(now - i * 86400)
+        k = time.strftime("%Y-%m-%d", lt)
+        days.append(_series_row(time.strftime("%b %d", lt), k, by_prefix(k)))
+    out["days"] = days
+
+    months = []
+    lt = time.localtime(now)
+    y, m = lt.tm_year, lt.tm_mon
+    for i in range(11, -1, -1):
+        mm, yy = m - i, y
+        while mm < 1:
+            mm += 12
+            yy -= 1
+        k = "%04d-%02d" % (yy, mm)
+        label = time.strftime("%b", time.strptime(k + "-01", "%Y-%m-%d"))
+        months.append(_series_row(label, k, by_prefix(k)))
+    out["months"] = months
+
+    first = min((int(k[:4]) for k in hours), default=y)
+    out["years"] = [_series_row(str(yy), str(yy), by_prefix("%04d" % yy))
+                    for yy in range(min(first, y), y + 1)]
+
+    session = []
+    if since:
+        start = int(since) - int(since) % 3600
+        t = start
+        while t <= now and len(session) < 168:
+            k = _hour_key(t)
+            session.append(_series_row(time.strftime("%H", time.localtime(t)), k, total([k])))
+            t += 3600
+    out["session"] = session
+
+    out["summary"] = {name: _summary(rows) for name, rows in out.items()}
+    today = days[-1]
+    out["today"] = {"keys": today["keys"], "wpm": today["wpm"]}
+    return out
 
 
 def load_stats(path=None):
@@ -590,10 +739,15 @@ def label_for(code):
     return name[4:] if name.startswith("KEY_") else name
 
 
+# When this recorder started counting: the start of the "session" history.
+SESSION_START = None
+
+
 def _write_status(recording, devices, error, total, paused=False):
     _write_json(STATUS, {
         "recording": recording,
         "paused": paused,
+        "since": int(SESSION_START) if recording and SESSION_START else 0,
         "pid": os.getpid() if recording else 0,
         "devices": devices,
         "error": error,
@@ -788,7 +942,10 @@ def _run_loop(devices, hotplug=True, rejected=(), session=None, seat="seat0"):
 
     _write_private(PIDFILE, str(os.getpid()))
 
-    tally = Tally(load_stats())
+    global SESSION_START
+    SESSION_START = time.time()
+    timeline = load_history()
+    tally = Tally(load_stats(), timeline)
     running = {"on": True}
 
     def stop(_signo, _frame):
@@ -839,8 +996,32 @@ def _run_loop(devices, hotplug=True, rejected=(), session=None, seat="seat0"):
     active = {"on": session_active(session)}
     pending = PendingKeys(tally)
 
+    written = {}  # path -> inode of the file this recorder last wrote
+
+    def replaced(path):
+        if path not in written:
+            return False
+        try:
+            return os.stat(path).st_ino != written[path]
+        except OSError:
+            return True
+
+    def save_stats():
+        # `reset` moves the files away while we run: start from zero instead
+        # of writing the old counts back over them.
+        if replaced(STATS):
+            tally.clear()
+        if replaced(HISTORY):
+            timeline.hours.clear()
+        for path, data in ((STATS, tally.to_dict()), (HISTORY, timeline.to_dict())):
+            _write_json(path, data)
+            try:
+                written[path] = os.stat(path).st_ino
+            except OSError:
+                written.pop(path, None)
+
     def flush():
-        _write_json(STATS, tally.to_dict())
+        save_stats()
         _write_status(True, names(), None, sum(tally.keys.values()),
                       paused=not active["on"])
 
@@ -884,7 +1065,7 @@ def _run_loop(devices, hotplug=True, rejected=(), session=None, seat="seat0"):
             last_flush = now
 
     pending.settle(active["on"], active["on"] and session_active(session))
-    _write_json(STATS, tally.to_dict())
+    save_stats()
     _write_status(False, names(), None, sum(tally.keys.values()))
     try:
         os.remove(PIDFILE)
@@ -1273,6 +1454,9 @@ def do_report(args):
             baseline = load_stats(path)
             name = os.path.basename(path)
     rep = build_report(baseline=baseline, baseline_name=name)
+    status = _read_json(STATUS, {})
+    since = status.get("since") if pid_alive(read_pid()) else None
+    rep["history"] = build_history(load_history(), since=since)
     if "--json" in args:
         _write_json(REPORT, rep)
         print(json.dumps(rep))
@@ -1357,11 +1541,14 @@ def _print_human(rep):
 # ---------------------------------------------------------------------------
 # reset / layout
 # ---------------------------------------------------------------------------
-def do_reset(_args):
-    if os.path.exists(STATS):
-        backup = STATS + "." + time.strftime("%Y%m%d-%H%M%S") + ".bak"
-        os.replace(STATS, backup)
-        print("backed up previous stats to " + backup)
+def do_reset(args):
+    # The typing history (keys and speed per hour) is kept unless asked: a
+    # reset is for comparing keymaps, not for forgetting how much you typed.
+    for path in (STATS, HISTORY) if "--history" in args else (STATS,):
+        if os.path.exists(path):
+            backup = path + "." + time.strftime("%Y%m%d-%H%M%S") + ".bak"
+            os.replace(path, backup)
+            print("backed up %s to %s" % (os.path.basename(path), backup))
     for path in (REPORT,):
         try:
             os.remove(path)

@@ -5,6 +5,27 @@
 // and status.json; this file only parses those and formats them for display,
 // so the QML stays declarative.
 
+var EMPTY_HISTORY = {
+  session: [], hours: [], days: [], months: [], years: [],
+  summary: {}, today: { keys: 0, wpm: null }
+}
+
+// The history periods, in the order the panel offers them. `value` is the
+// report's series name, `setting` the name used in the widget settings.
+var HISTORY_RANGES = [
+  { value: "session", label: "Session", setting: "Session" },
+  { value: "hours", label: "24 h", setting: "24 hours" },
+  { value: "days", label: "30 days", setting: "30 days" },
+  { value: "months", label: "12 months", setting: "12 months" },
+  { value: "years", label: "Years", setting: "Years" }
+]
+
+function historyRange(setting) {
+  for (var i = 0; i < HISTORY_RANGES.length; i++)
+    if (HISTORY_RANGES[i].setting === setting) return HISTORY_RANGES[i].value
+  return "days"
+}
+
 var EMPTY_REPORT = {
   total: 0,
   distinct: 0,
@@ -21,7 +42,8 @@ var EMPTY_REPORT = {
   heatmap: [],
   layout: { name: "", source: "default" },
   compare: null,
-  suggestions: []
+  suggestions: [],
+  history: EMPTY_HISTORY
 }
 
 var EMPTY_STATUS = {
@@ -64,6 +86,9 @@ function parseReport(text) {
   r.layout = r.layout || EMPTY_REPORT.layout
   r.compare = r.compare || null
   r.suggestions = r.suggestions || []
+  r.history = r.history || EMPTY_HISTORY
+  r.history.summary = r.history.summary || {}
+  r.history.today = r.history.today || EMPTY_HISTORY.today
   return r
 }
 
@@ -151,6 +176,33 @@ function capName(label) {
   return k.length > 3 ? k.slice(0, 3).toLowerCase() : k
 }
 
+// "L-pinky" -> "pinky": the column chart puts left and right on their own side.
+function fingerShort(code) {
+  var p = String(code).split("-")
+  var f = p.length === 2 ? p[1] : String(code)
+  return f === "middle" ? "mid" : f
+}
+
+// Largest numeric field over a list of objects (0 for an empty list).
+function maxOf(list, field) {
+  var most = 0
+  for (var i = 0; i < (list || []).length; i++) most = Math.max(most, Number(list[i][field]) || 0)
+  return most
+}
+
+// The hold-time histogram ({ms, count} in 10 ms buckets) re-bucketed for a
+// chart: `step` ms per bar up to `maxMs`, everything slower in the last bar.
+function holdBars(hist, maxMs, step) {
+  var n = Math.floor(maxMs / step) + 1
+  var bars = []
+  for (var i = 0; i < n; i++) bars.push(0)
+  for (var j = 0; j < (hist || []).length; j++) {
+    var b = Math.min(n - 1, Math.floor((Number(hist[j].ms) || 0) / step))
+    bars[b] += Number(hist[j].count) || 0
+  }
+  return bars
+}
+
 // Widest heatmap row, in key units.
 function gridUnits(rows) {
   var most = 0
@@ -168,6 +220,14 @@ function delta(d) {
   var n = Number(d)
   if (Math.abs(n) < 0.05) return "±0"
   return (n > 0 ? "+" : "") + n.toFixed(1)
+}
+
+// Active minutes as "45 min" or "3 h 20".
+function duration(min) {
+  var m = Math.round(Number(min) || 0)
+  if (m < 60) return m + " min"
+  var h = Math.floor(m / 60)
+  return h + " h" + (m % 60 ? " " + String(m % 60).padStart(2, "0") : "")
 }
 
 // Integer with thousands separators, for the big keypress total.

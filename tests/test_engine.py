@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -330,6 +331,67 @@ class PendingKeysTest(unittest.TestCase):
             self.assertFalse(pending.full())
             pending.add("A", i % 2 == 0, i * 0.1)
         self.assertTrue(pending.full())
+
+
+class TimelineTest(unittest.TestCase):
+    """Keys, characters and active time per hour, for the history and WPM."""
+
+    def setUp(self):
+        # a fixed local hour, so bucket keys do not depend on when tests run
+        self.t0 = time.mktime((2026, 10, 9, 10, 0, 0, 0, 0, -1))
+
+    def test_typing_speed(self):
+        tl = E.Timeline()
+        tally = E.Tally(timeline=tl)
+        # 60 characters, one every 0.2 s: 12 s of typing, 60 chars = 12 words
+        typed(tally, "the quick brown fox jumps over the lazy dog and keeps going on", start=self.t0, step=0.2)
+        b = tl.hours["2026-10-09T10"]
+        self.assertEqual(b[0], b[1])  # every key typed a character
+        self.assertAlmostEqual(b[2], (b[0] - 1) * 200, delta=5)
+        self.assertIsNone(E.wpm(b[1], b[2]))  # under 20 s of typing: no speed yet
+        self.assertEqual(E.wpm(100, 60000), 20.0)
+
+    def test_idle_and_shortcuts_do_not_count(self):
+        tl = E.Timeline()
+        tally = E.Tally(timeline=tl)
+        tally.press("A", self.t0)
+        tally.press("B", self.t0 + 10)  # a long pause is not typing time
+        tally.press("LEFTCTRL", self.t0 + 10.1)
+        tally.press("C", self.t0 + 10.2)  # Ctrl+C: a key, not a character
+        tally.press("BACKSPACE", self.t0 + 10.3)
+        self.assertEqual(tl.hours["2026-10-09T10"], [5, 2, 300])
+
+    def test_reset_keeps_the_timeline(self):
+        tl = E.Timeline()
+        tally = E.Tally({"keys": {"A": 3}}, tl)
+        tally.press("A", self.t0)
+        tally.clear()
+        self.assertEqual(tally.keys, {})
+        self.assertIs(tally.timeline, tl)
+        self.assertEqual(tl.hours["2026-10-09T10"][0], 1)
+
+    def test_history_rollups(self):
+        tl = E.Timeline({"hours": {
+            "2026-10-09T10": [600, 500, 300000],   # 500 chars in 5 min: 20 wpm
+            "2026-10-08T22": [100, 100, 60000],
+            "2025-03-01T09": [50, 40, 10000],
+        }})
+        now = self.t0 + 1800
+        h = E.build_history(tl, now=now, since=self.t0 + 60)
+        self.assertEqual(len(h["hours"]), 24)
+        self.assertEqual(h["hours"][-1]["keys"], 600)
+        self.assertEqual(h["hours"][-1]["wpm"], 20.0)
+        self.assertEqual(len(h["days"]), 30)
+        self.assertEqual([d["keys"] for d in h["days"][-2:]], [100, 600])
+        self.assertEqual(len(h["months"]), 12)
+        self.assertEqual(h["months"][-1]["keys"], 700)
+        self.assertEqual([y["label"] for y in h["years"]], ["2025", "2026"])
+        self.assertEqual([y["keys"] for y in h["years"]], [50, 700])
+        self.assertEqual(len(h["session"]), 1)
+        self.assertEqual(h["today"], {"keys": 600, "wpm": 20.0})
+        self.assertEqual(h["summary"]["days"]["keys"], 700)
+        self.assertEqual(h["summary"]["days"]["peak_wpm"], 20.0)
+        self.assertEqual(E.build_history(E.Timeline(), now=now)["session"], [])
 
 
 class SeatTest(unittest.TestCase):

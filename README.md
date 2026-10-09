@@ -58,6 +58,8 @@ Listed on the [Omarchy plugin marketplace](https://omarchyplugins.com/plugin.htm
   picks up keyboards plugged in later, copes with keyboards being unplugged,
   and resumes after a reboot if it was on.
 - **CSV export** for external layout tools (oxeylyzer, genkey and similar).
+- **Typing history and speed**: keypresses and words per minute for the
+  current session, the last 24 hours, 30 days, 12 months or every year.
 - **Safe reset**: resetting backs the old counts up instead of deleting them.
 
 ## Privacy
@@ -71,6 +73,9 @@ A key logger is sensitive software, so here is exactly what this one keeps.
 - **Shortcut → count** for keys pressed while Ctrl, Alt or Super is held.
 - **Histograms of hold time and roll overlap** in 10 ms buckets, and the
   average hold time per key.
+- **Per hour of the day: keypresses, typed characters and seconds of active
+  typing** (three numbers, in `history.json`), for the History tab and words
+  per minute. It shows *how much* you typed in a given hour, not *which keys*.
 
 It never keeps the order of your keypresses, never stores a timestamp per key,
 never records which window had focus, and never sends anything over the
@@ -164,10 +169,10 @@ The widget goes to the right side of the bar. Move it with
 | Middle-click the keyboard icon | Start or stop recording without opening the panel |
 | **Start recording** / **Stop** | Start or stop the background counter |
 | **Refresh** | Recompute the analysis now |
-| **Reset**, then **Confirm reset** | Back up the current counts and start from zero |
+| **Reset**, then **Confirm reset** | Back up the current counts and start from zero (the typing history is kept) |
 
-Keyboard shortcuts while the panel is open: `S` start/stop, `R` refresh, `X`
-reset, `Esc` close.
+Keyboard shortcuts while the panel is open: `1`–`4` switch tabs, `S`
+start/stop, `R` refresh, `X` reset, `Esc` close.
 
 The icon is dimmed when nothing has been recorded yet and highlighted while
 recording. Hover it for the current total.
@@ -191,9 +196,10 @@ Change these from the Omarchy settings panel, or in the widget's entry in
 | `showLabel` | `false` | Show a number next to the bar icon |
 | `labelMode` | `Total` | `Total`: keypresses on record. `Top key`: your most-pressed key |
 | `topKeys` | `12` | Keys listed in the panel (5–40) |
-| `topBigrams` | `10` | Key-pairs listed in the panel (5–30) |
+| `topBigrams` | `10` | Key-pairs listed in the panel (5–30; the Layout tab shows at most 8) |
 | `refreshIntervalSec` | `3` | How often the open panel refreshes (1–30 s) |
 | `showHeatmap` | `true` | Show the keyboard heatmap |
+| `historyRange` | `30 days` | Period the History tab opens on: `Session`, `24 hours`, `30 days`, `12 months` or `Years` |
 | `compareWithPrevious` | `true` | Compare with the recording before the last reset |
 | `resumeRecording` | `true` | Start recording again after a reboot or logout, if it was on |
 
@@ -202,7 +208,22 @@ icon reflects whether recording is on.
 
 ## Reading the analysis
 
-The panel shows these sections, top to bottom:
+The panel has four tabs, each sized to fit on one screen:
+
+- **Overview**: four headline numbers (keypresses, same-finger rate, today's
+  words per minute and your tapping term or median tap), the heatmap, the
+  most-pressed keys and hand balance.
+- **Layout**: finger load as a column chart, trigram patterns as one stacked
+  bar, top key-pairs next to the same-finger pairs, and top shortcuts.
+- **Timing**: hold-time numbers, a histogram of how long you hold a key with
+  the suggested TAPPING_TERM marked, per-key home-row holds and the QMK
+  suggestions.
+- **History**: pick a period (the recording session, 24 hours, 30 days, 12
+  months or years) to see keypresses and words per minute for each hour, day,
+  month or year, with totals, typing time, average and best speed. Hover a bar
+  for its numbers.
+
+What each section means:
 
 - **Comparison** (only after a reset): the previous recording's same-finger
   bigram rate next to the current one. Finger load rows also show the change in
@@ -244,6 +265,13 @@ The panel shows these sections, top to bottom:
   - *suggested TAPPING_TERM*: above nearly all your taps, with a 30 ms margin,
     kept between 150 and 300 ms. It appears after a few hundred keypresses.
 - **QMK suggestions**: short, plain-language takeaways from all of the above.
+- **Words per minute**: characters typed (letters, digits, punctuation and
+  Space; not Backspace, arrows, modifiers or shortcuts) divided by 5, per
+  minute of *active* typing. Active time adds up the gaps between keypresses
+  shorter than 1.5 s, so reading, thinking and breaks don't drag the number
+  down. A period with less than 20 s of typing shows no speed. Because
+  corrections are not subtracted, it reads a little higher than a typing
+  test's net WPM.
 
 Without a custom layout, fingering assumes standard QWERTY touch typing on a
 row-staggered keyboard with Space on the thumbs. Keys outside the main block
@@ -329,6 +357,7 @@ engine/omakeylog report --json          # same analysis as JSON (what the panel 
 engine/omakeylog report --csv           # key,count,percent - for layout optimizers
 engine/omakeylog report --no-compare    # leave out the comparison with the last backup
 engine/omakeylog reset                  # back up stats.json and start from zero
+engine/omakeylog reset --history        # the same, and the typing history too
 engine/omakeylog layout show            # which keys each finger types
 engine/omakeylog layout import-vil FILE [--right-inner-first]
 engine/omakeylog layout reset           # back to the QWERTY mapping
@@ -349,6 +378,7 @@ set it:
 | File | Contents |
 |---|---|
 | `stats.json` | The raw counts and timing histograms (see [Privacy](#privacy)) |
+| `history.json` | Keypresses, characters and active typing time per hour |
 | `report.json` | The derived analysis the panel displays |
 | `status.json` | Whether recording is on or paused, which devices, last error, totals |
 | `state.json` | Whether recording should resume at the next login |
