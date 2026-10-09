@@ -9,12 +9,13 @@ import "Model.js" as Model
 // a keyboard heatmap, ranked keys, hand and finger load, same-finger pairs,
 // trigram patterns, shortcuts, typing timing and QMK suggestions.
 //
-// Four tabs keep each view on one screen: Overview (summary numbers, the
+// Five tabs keep each view on one screen: Overview (summary numbers, the
 // heatmap, top keys, hand balance), Layout (finger load, trigram patterns,
-// key pairs, shortcuts), Timing (hold times, TAPPING_TERM, suggestions) and
-// History (keypresses and words per minute over a chosen period).
+// key pairs, shortcuts), Timing (hold times, TAPPING_TERM), History
+// (keypresses and words per minute over a chosen period) and Tips (the QMK
+// suggestions).
 //
-// Keys: 1-4 switch tabs, S start/stop recording, R refresh, X reset (twice to
+// Keys: 1-5 switch tabs, S start/stop recording, R refresh, X reset (twice to
 // confirm), Esc close.
 Panel {
   id: root
@@ -34,8 +35,8 @@ Panel {
 
   readonly property int topKeys: hostWidget ? Math.max(5, Number(hostWidget.setting("topKeys", 12))) : 12
   readonly property int topBigrams: hostWidget ? Math.max(5, Number(hostWidget.setting("topBigrams", 10))) : 10
-  // Layout tab rows per list; more than 8 would push it past one screen.
-  readonly property int pairRows: Math.min(8, topBigrams)
+  // Layout tab rows per list; more than 7 would push it past one screen.
+  readonly property int pairRows: Math.min(7, topBigrams)
   readonly property bool showHeatmap: hostWidget ? hostWidget.setting("showHeatmap", true) !== false : true
   readonly property var compare: report.compare
 
@@ -45,12 +46,18 @@ Panel {
   readonly property color accent: Color.accent
 
   property bool confirmReset: false
+  // Height the content column may use: the panel's 720 cap or the screen,
+  // whichever is smaller, less the panel's own padding.
+  readonly property real maxHeight: Math.min(Style.space(720),
+      panel.availableCardHeight > 0 ? panel.availableCardHeight : Style.space(720))
+    - panel.verticalContentInset
 
   readonly property var tabs: [
     { value: "overview", label: "Overview" },
     { value: "layout", label: "Layout" },
     { value: "timing", label: "Timing" },
-    { value: "history", label: "History" }
+    { value: "history", label: "History" },
+    { value: "tips", label: "Tips" }
   ]
   property string tab: "overview"
 
@@ -109,7 +116,7 @@ Panel {
         if (k === "s" && root.hostWidget) root.hostWidget.toggleRecording()
         else if (k === "r" && root.hostWidget) root.hostWidget.refresh()
         else if (k === "x") root.doReset()
-        else if (k >= "1" && k <= "4") root.tab = root.tabs[Number(k) - 1].value
+        else if (k >= "1" && k <= "5") root.tab = root.tabs[Number(k) - 1].value
       }
 
       Column {
@@ -217,11 +224,22 @@ Panel {
 
         // ---------- Analysis ----------
         // Each tab is sized to fit without scrolling; the Flickable is only a
-        // fallback for a very small screen or many suggestions.
+        // fallback for a very small screen or many suggestions. It gets
+        // whatever the panel's height limit leaves after the header and footer.
         Flickable {
           id: flick
+          readonly property real chrome: {
+            var h = 0, n = 0
+            for (var i = 0; i < column.children.length; i++) {
+              var c = column.children[i]
+              if (!c.visible) continue
+              n++
+              if (c !== flick) h += c.height
+            }
+            return h + column.spacing * Math.max(0, n - 1)
+          }
           width: parent.width
-          height: Math.min(body.implicitHeight, Style.space(500))
+          height: Math.min(body.implicitHeight, Math.max(Style.space(200), root.maxHeight - chrome))
           contentWidth: width
           contentHeight: body.implicitHeight
           clip: true
@@ -542,10 +560,9 @@ Panel {
                 visible: root.report.sfs.top.length > 0
                 width: parent.width
                 textFormat: Text.PlainText
-                wrapMode: Text.Wrap
-                text: "Same-finger pairs - the main thing a good layout reduces.  "
-                      + "With one key in between: " + root.report.sfs.pct + "%"
-                      + "  ·  worst: " + root.report.sfs.top.slice(0, 3).map(function(r) {
+                elide: Text.ElideRight
+                text: "Same finger, one key between: " + root.report.sfs.pct + "%"
+                      + "  ·  " + root.report.sfs.top.slice(0, 3).map(function(r) {
                           return Model.pairName(r.pair) }).join(", ")
                 color: root.dim
                 font.family: root.fontFamily
@@ -712,6 +729,24 @@ Panel {
                   }
                 }
               }
+            }
+
+            // ================= TIPS =================
+            Column {
+              visible: root.total > 0 && root.tab === "tips"
+              width: parent.width
+              spacing: Style.space(10)
+
+              Text {
+                visible: root.report.suggestions.length === 0
+                width: parent.width
+                textFormat: Text.PlainText
+                wrapMode: Text.Wrap
+                text: "No suggestions yet - they appear once there is enough typing to judge."
+                color: root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
 
               SectionLabel { text: "QMK SUGGESTIONS"; visible: root.report.suggestions.length > 0 }
               Repeater {
@@ -864,7 +899,7 @@ Panel {
           width: parent.width
           textFormat: Text.PlainText
           horizontalAlignment: Text.AlignHCenter
-          text: "1-4 tabs   S " + (root.recording ? "stop" : "record") + "   R refresh   X reset   Esc close"
+          text: "1-5 tabs   S " + (root.recording ? "stop" : "record") + "   R refresh   X reset   Esc close"
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
