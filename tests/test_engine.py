@@ -508,7 +508,7 @@ class RecordLoopTest(unittest.TestCase):
         self.ecodes = evdev.ecodes
         self.dir = tempfile.TemporaryDirectory()
         self.saved = {}
-        for name in ("DATA_DIR", "STATS", "STATUS", "STATE", "PIDFILE", "REPORT"):
+        for name in ("DATA_DIR", "STATS", "STATUS", "STATE", "PIDFILE", "REPORT", "HISTORY"):
             self.saved[name] = getattr(E, name)
             setattr(E, name, os.path.join(self.dir.name, os.path.basename(getattr(E, name))))
         self.saved["RESCAN_SECONDS"] = E.RESCAN_SECONDS

@@ -252,7 +252,7 @@ Panel {
 
               Row {
                 width: parent.width
-                Kpi { width: parent.width / 4; value: Model.grouped(root.total); caption: "keys" }
+                Kpi { width: parent.width / 4; value: Model.grouped(root.report.history.today.keys); caption: "keys today" }
                 Kpi { width: parent.width / 4; value: root.report.sfb.pct + "%"; caption: "same-finger"; warn: root.report.sfb.pct >= 3 }
                 Kpi {
                   width: parent.width / 4
@@ -265,6 +265,39 @@ Panel {
                   value: root.report.timing.tapping_term ? root.report.timing.tapping_term + " ms"
                          : (root.report.timing.hold_median ? root.report.timing.hold_median + " ms" : "-")
                   caption: root.report.timing.tapping_term ? "tapping term" : "median tap"
+                }
+              }
+
+              // Words per minute over the last two weeks; click for the History tab
+              Item {
+                readonly property var days: root.report.history.days.slice(-14)
+                visible: Model.maxOf(days, "wpm") > 0
+                width: parent.width
+                height: visible ? Style.space(30) : 0
+                SeriesBars {
+                  id: spark
+                  anchors.left: parent.left
+                  anchors.right: sparkLabel.left
+                  anchors.rightMargin: Style.space(10)
+                  height: parent.height
+                  rows: parent.days
+                  field: "wpm"
+                  hoverable: false
+                }
+                Text {
+                  id: sparkLabel
+                  anchors.right: parent.right
+                  anchors.verticalCenter: parent.verticalCenter
+                  textFormat: Text.PlainText
+                  text: "wpm, 14 days  ›"
+                  color: root.dim
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: { root.pickedRange = "days"; root.tab = "history" }
                 }
               }
 
@@ -359,7 +392,7 @@ Panel {
 
               SectionLabel { text: "MOST-PRESSED KEYS" }
               Grid {
-                readonly property var keys: root.report.top_keys.slice(0, root.topKeys)
+                readonly property var keys: root.report.top_keys.slice(0, Math.min(8, root.topKeys))
                 width: parent.width
                 columns: 2
                 rows: Math.ceil(keys.length / 2)
@@ -708,7 +741,6 @@ Panel {
               property int hovered: -1
               readonly property real mostWpm: Math.max(1, Model.maxOf(root.series, "wpm"))
               readonly property real mostKeys: Math.max(1, Model.maxOf(root.series, "keys"))
-              readonly property real barW: width / Math.max(1, root.series.length)
               readonly property var shown: hovered >= 0 && hovered < root.series.length
                                            ? root.series[hovered] : null
 
@@ -1044,29 +1076,31 @@ Panel {
     }
   }
 
-  // One bar per history bucket, scaled to `most`; hovering a bar shows its
-  // numbers under the charts.
+  // One bar per history bucket, scaled to `most`. In the History tab hovering
+  // a bar shows its numbers under the charts.
   component SeriesBars: Item {
     id: sb
+    property var rows: root.series
     property string field: "keys"
-    property real most: 1
+    property real most: Math.max(1, Model.maxOf(rows, field))
     property color barColor: root.accent
+    property bool hoverable: true
     Row {
       anchors.fill: parent
       Repeater {
-        model: root.series
+        model: sb.rows
         delegate: Item {
           id: sbar
           required property var modelData
           required property int index
           readonly property real v: Number(modelData[sb.field]) || 0
-          width: historyTab.barW
+          width: sb.width / Math.max(1, sb.rows.length)
           height: sb.height
           Rectangle {
             anchors.fill: parent
             anchors.leftMargin: 0.5
             anchors.rightMargin: 0.5
-            visible: historyTab.hovered === sbar.index
+            visible: sb.hoverable && historyTab.hovered === sbar.index
             color: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.08)
           }
           Rectangle {
@@ -1079,6 +1113,7 @@ Panel {
                               : Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
           }
           HoverHandler {
+            enabled: sb.hoverable
             onHoveredChanged: {
               if (hovered) historyTab.hovered = sbar.index
               else if (historyTab.hovered === sbar.index) historyTab.hovered = -1

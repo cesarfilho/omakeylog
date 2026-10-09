@@ -195,7 +195,7 @@ Change these from the Omarchy settings panel, or in the widget's entry in
 |---|---|---|
 | `showLabel` | `false` | Show a number next to the bar icon |
 | `labelMode` | `Total` | `Total`: keypresses on record. `Top key`: your most-pressed key |
-| `topKeys` | `12` | Keys listed in the panel (5–40) |
+| `topKeys` | `12` | Keys listed in the panel (5–40; the Overview tab shows at most 8) |
 | `topBigrams` | `10` | Key-pairs listed in the panel (5–30; the Layout tab shows at most 8) |
 | `refreshIntervalSec` | `3` | How often the open panel refreshes (1–30 s) |
 | `showHeatmap` | `true` | Show the keyboard heatmap |
@@ -210,9 +210,10 @@ icon reflects whether recording is on.
 
 The panel has four tabs, each sized to fit on one screen:
 
-- **Overview**: four headline numbers (keypresses, same-finger rate, today's
-  words per minute and your tapping term or median tap), the heatmap, the
-  most-pressed keys and hand balance.
+- **Overview**: four headline numbers (today's keypresses, same-finger rate,
+  today's words per minute and your tapping term or median tap), words per
+  minute over the last 14 days (click it for the History tab), the heatmap,
+  the 8 most-pressed keys and hand balance.
 - **Layout**: finger load as a column chart, trigram patterns as one stacked
   bar, top key-pairs next to the same-finger pairs, and top shortcuts.
 - **Timing**: hold-time numbers, a histogram of how long you hold a key with

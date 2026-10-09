@@ -233,5 +233,5 @@ function duration(min) {
 // Integer with thousands separators, for the big keypress total.
 function grouped(n) {
   var s = String(Math.max(0, Math.floor(Number(n) || 0)))
-  return s.replace(/\B(?=(\d{3})+(?!\d))/g, " ")
+  return s.replace(/\B(?=(\d{3})+(?!\d))/g, " ")
 }
