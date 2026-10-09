@@ -274,8 +274,62 @@ class SessionTest(unittest.TestCase):
             self.assertTrue(E.screen_locked())
             E._run_quiet = lambda cmd: "false" if cmd[0] == "omarchy-shell" else None
             self.assertFalse(E.screen_locked())
+            # Omarchy's lock does not set LockedHint, so a lock status that
+            # cannot be read must count as locked, not unlocked.
+            E._run_quiet = lambda cmd: None  # failed or timed out
+            self.assertTrue(E.screen_locked())
+            E._run_quiet = lambda cmd: "" if cmd[0] == "omarchy-shell" else None
+            self.assertTrue(E.screen_locked())
         finally:
             E._run_quiet = real
+
+
+class PendingKeysTest(unittest.TestCase):
+    """Keys wait for the next session check before they are counted."""
+
+    def type(self, pending, text, t=0.0):
+        for ch in text:
+            pending.add(ch.upper(), True, t)
+            pending.add(ch.upper(), False, t + 0.05)
+            t += 0.1
+
+    def test_counted_when_still_active(self):
+        tally = E.Tally()
+        pending = E.PendingKeys(tally)
+        self.type(pending, "ab")
+        self.assertEqual(sum(tally.keys.values()), 0)  # nothing before the check
+        self.assertTrue(pending.settle(True, True))
+        self.assertEqual(tally.keys, {"A": 1, "B": 1})
+
+    def test_discarded_after_switch_or_lock(self):
+        tally = E.Tally()
+        pending = E.PendingKeys(tally)
+        self.type(pending, "secret")  # typed after the lock, before the check
+        pending.settle(True, False)
+        self.assertEqual(sum(tally.keys.values()), 0)
+        self.type(pending, "secret", t=5.0)  # inactive at both checks
+        self.assertFalse(pending.settle(False, False))
+        self.type(pending, "pw", t=9.0)  # read while the unlock was unseen
+        pending.settle(False, True)
+        self.assertEqual(sum(tally.keys.values()), 0)
+
+    def test_unplugged_keyboard_drops_held_keys(self):
+        tally = E.Tally()
+        pending = E.PendingKeys(tally)
+        pending.add("A", True, 0.0)
+        pending.device_gone()
+        pending.add("B", True, 0.5)
+        pending.add("B", False, 0.6)
+        pending.settle(True, True)
+        self.assertEqual(tally.keys, {"A": 1, "B": 1})
+        self.assertNotIn("A", tally.down)
+
+    def test_full(self):
+        pending = E.PendingKeys(E.Tally())
+        for i in range(E.PENDING_MAX):
+            self.assertFalse(pending.full())
+            pending.add("A", i % 2 == 0, i * 0.1)
+        self.assertTrue(pending.full())
 
 
 class SeatTest(unittest.TestCase):

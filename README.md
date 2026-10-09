@@ -86,10 +86,14 @@ It only counts **your own typing**:
   the active one on the seat (`Active=yes`) and that the screen is not locked.
   Lock state comes from logind's `LockedHint` and, because Omarchy's lock
   screen and hyprlock don't report it there, from the lockers themselves
-  (`omarchy-shell lock isLocked`, a running `hyprlock`). While another user's
-  session is in front or the screen is locked, keys are read and thrown away,
-  so the password you type to unlock is never counted, and the panel shows
-  **Paused**.
+  (`omarchy-shell lock isLocked`, a running `hyprlock`). If the lock state
+  can't be read (the call fails or times out), the screen counts as locked.
+  Keys are held back until the next check and counted only if the session was
+  active and unlocked both before and after them, so typing right after a lock
+  or user switch is never counted on stale state; the last second before a
+  lock may be lost. While another user's session is in front or the screen is
+  locked, keys are read and thrown away, so the password you type to unlock
+  is never counted, and the panel shows **Paused**.
 - **Fails closed.** Without a logind session that has a seat, recording does
   not start; if logind cannot be asked, nothing is counted.
 

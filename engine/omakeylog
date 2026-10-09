@@ -60,6 +60,8 @@ FLUSH_SECONDS = 5.0
 RESCAN_SECONDS = 3.0
 # How often it checks that its login session is still the active, unlocked one.
 SESSION_CHECK_SECONDS = 1.0
+# Check sooner when this many keys are waiting for the check to count them.
+PENDING_MAX = 512
 # Hold and overlap histograms: 10 ms buckets, everything >= 1 s in one bucket.
 BUCKET_MS = 10
 BUCKET_CAP_MS = 1000
@@ -629,12 +631,12 @@ def _run_quiet(cmd):
 
 def screen_locked():
     """True when a screen locker is up. Not every locker reports LockedHint to
-    logind (Omarchy's own lock screen does not), so ask the lockers directly."""
-    if _run_quiet(["omarchy-shell", "lock", "isLocked"]) == "true":
-        return True
+    logind (Omarchy's own lock screen does not), so ask the lockers directly.
+    Only an explicit "false" from Omarchy counts as unlocked: a failed, timed
+    out or unexpected answer counts as locked."""
     if _run_quiet(["pgrep", "-u", str(os.getuid()), "-x", "hyprlock"]):
         return True
-    return False
+    return _run_quiet(["omarchy-shell", "lock", "isLocked"]) != "false"
 
 
 def session_id():
@@ -661,6 +663,48 @@ def session_active(sid):
     if props.get("Active") != "yes" or props.get("LockedHint") == "yes":
         return False
     return not screen_locked()
+
+
+class PendingKeys:
+    """Keys read but not yet counted.
+
+    The session is checked once a second, so a key read now may belong to a
+    user switch or a lock that the last check has not seen yet. Keys wait here
+    and are counted only when the check that follows them confirms the session
+    was active and unlocked both before and after; otherwise they are thrown
+    away. Losing the last second of typing before a lock is the price.
+    """
+
+    def __init__(self, tally):
+        self.tally = tally
+        self.items = []
+
+    def add(self, label, pressed, at):
+        self.items.append((label, pressed, at))
+
+    def device_gone(self):
+        if self.items:
+            self.items.append(None)
+
+    def full(self):
+        return len(self.items) >= PENDING_MAX
+
+    def settle(self, active_before, active_now):
+        """Count or discard what is waiting; True when anything changed."""
+        items, self.items = self.items, []
+        if not (active_before and active_now):
+            if active_before != active_now:
+                self.tally.drop_held()
+                return True
+            return False
+        for item in items:
+            if item is None:  # a keyboard went away here
+                self.tally.drop_held()
+            elif item[1]:
+                self.tally.press(item[0], item[2])
+            else:
+                self.tally.release(item[0], item[2])
+        return bool(items)
 
 
 def do_record(args):
@@ -793,6 +837,7 @@ def _run_loop(devices, hotplug=True, rejected=(), session=None, seat="seat0"):
     dirty = False
     last_flush = last_scan = last_session = time.monotonic()
     active = {"on": session_active(session)}
+    pending = PendingKeys(tally)
 
     def flush():
         _write_json(STATS, tally.to_dict())
@@ -807,6 +852,7 @@ def _run_loop(devices, hotplug=True, rejected=(), session=None, seat="seat0"):
                 events = list(dev.read())
             except OSError:
                 drop(dev)
+                pending.device_gone()
                 dirty = True
                 continue
             if not active["on"]:
@@ -818,18 +864,14 @@ def _run_loop(devices, hotplug=True, rejected=(), session=None, seat="seat0"):
                 label = label_for(ev.code)
                 if not label or label.startswith("BTN_"):
                     continue
-                now = ev.timestamp()
-                if ev.value == 1:
-                    tally.press(label, now)
-                else:
-                    tally.release(label, now)
-                dirty = True
+                pending.add(label, ev.value == 1, ev.timestamp())
         now = time.monotonic()
-        if now - last_session >= SESSION_CHECK_SECONDS:
+        if now - last_session >= SESSION_CHECK_SECONDS or pending.full():
             last_session = now
             was, active["on"] = active["on"], session_active(session)
+            if pending.settle(was, active["on"]):
+                dirty = True
             if was != active["on"]:
-                tally.drop_held()
                 dirty = True
                 last_flush = 0  # show the pause in the panel right away
         if hotplug and now - last_scan >= RESCAN_SECONDS:
@@ -841,6 +883,7 @@ def _run_loop(devices, hotplug=True, rejected=(), session=None, seat="seat0"):
             dirty = False
             last_flush = now
 
+    pending.settle(active["on"], active["on"] and session_active(session))
     _write_json(STATS, tally.to_dict())
     _write_status(False, names(), None, sum(tally.keys.values()))
     try:
